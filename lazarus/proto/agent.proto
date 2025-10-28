@@ -1,0 +1,161 @@
+syntax = "proto3";
+
+package lazarus.agent;
+
+// Agent service for communication between agents and server
+service AgentService {
+    // Register a new agent with the server
+    rpc RegisterAgent(RegisterRequest) returns (RegisterResponse);
+
+    // Get pending jobs for this agent
+    rpc GetJobs(GetJobsRequest) returns (GetJobsResponse);
+
+    // Report job start
+    rpc StartJob(JobStartRequest) returns (JobStartResponse);
+
+    // Stream job progress updates
+    rpc ReportProgress(stream ProgressUpdate) returns (ProgressAck);
+
+    // Report job completion
+    rpc CompleteJob(JobCompletionRequest) returns (JobCompletionResponse);
+
+    // Heartbeat to maintain connection
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// Chunk service for chunk existence checks and uploads
+service ChunkService {
+    // Check if chunks exist on server
+    rpc CheckChunksExist(stream ChunkHash) returns (stream ChunkExistenceResponse);
+
+    // Upload new chunks
+    rpc UploadChunk(stream ChunkUpload) returns (ChunkUploadResponse);
+
+    // Download chunk
+    rpc DownloadChunk(ChunkDownloadRequest) returns (stream ChunkData);
+}
+
+// Agent registration
+message RegisterRequest {
+    string agent_id = 1;
+    string hostname = 2;
+    string os_type = 3;
+    string os_version = 4;
+    string agent_version = 5;
+    map<string, string> metadata = 6;
+}
+
+message RegisterResponse {
+    bool success = 1;
+    string message = 2;
+    string server_version = 3;
+}
+
+// Job management
+message GetJobsRequest {
+    string agent_id = 1;
+}
+
+message GetJobsResponse {
+    repeated Job jobs = 1;
+}
+
+message Job {
+    string job_id = 1;
+    JobType job_type = 2;
+    string repository_path = 3;
+    repeated string source_paths = 4;
+    map<string, string> parameters = 5;
+    int64 scheduled_time = 6;
+}
+
+enum JobType {
+    BACKUP = 0;
+    RESTORE = 1;
+    VERIFY = 2;
+    PRUNE = 3;
+}
+
+message JobStartRequest {
+    string job_id = 1;
+    string agent_id = 2;
+    int64 start_time = 3;
+}
+
+message JobStartResponse {
+    bool acknowledged = 1;
+}
+
+message ProgressUpdate {
+    string job_id = 1;
+    string agent_id = 2;
+    int32 progress_percent = 3;
+    string status_message = 4;
+    int64 bytes_processed = 5;
+    int64 total_bytes = 6;
+}
+
+message ProgressAck {
+    bool received = 1;
+}
+
+message JobCompletionRequest {
+    string job_id = 1;
+    string agent_id = 2;
+    bool success = 3;
+    string error_message = 4;
+    int64 completion_time = 5;
+    JobStatistics statistics = 6;
+}
+
+message JobStatistics {
+    int64 bytes_processed = 1;
+    int64 files_processed = 2;
+    int64 chunks_created = 3;
+    int64 chunks_deduplicated = 4;
+    int64 duration_seconds = 5;
+}
+
+message JobCompletionResponse {
+    bool acknowledged = 1;
+}
+
+// Heartbeat
+message HeartbeatRequest {
+    string agent_id = 1;
+    int64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+    bool alive = 1;
+    int64 server_time = 2;
+}
+
+// Chunk operations
+message ChunkHash {
+    string hash = 1;
+}
+
+message ChunkExistenceResponse {
+    string hash = 1;
+    bool exists = 2;
+}
+
+message ChunkUpload {
+    string hash = 1;
+    bytes data = 2;
+    int32 uncompressed_size = 3;
+}
+
+message ChunkUploadResponse {
+    int32 chunks_uploaded = 1;
+    bool success = 2;
+}
+
+message ChunkDownloadRequest {
+    string hash = 1;
+}
+
+message ChunkData {
+    bytes data = 1;
+}
