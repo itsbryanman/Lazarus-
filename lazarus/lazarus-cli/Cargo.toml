@@ -1,0 +1,14 @@
+[package]
+name = "lazarus-cli"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.5.50", features = ["derive"] }
+lazarus-core = { path = "../lazarus-core" }
+tokio = { version = "1.48.0", features = ["full"] }
+blake3 = "1.8.2"
+zstd = "0.13.3"
+aes-gcm = "0.10.3"
