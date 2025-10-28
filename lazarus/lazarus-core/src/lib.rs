@@ -5,3 +5,4 @@ pub mod encryption;
 pub mod catalog;
 pub mod error;
 pub mod chunking;
+pub mod config;

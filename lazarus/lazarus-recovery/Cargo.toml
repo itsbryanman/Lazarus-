@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+lazarus-core = { path = "../lazarus-core" }
+tokio = { version = "1.48.0", features = ["full"] }
