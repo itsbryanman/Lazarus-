@@ -1,39 +1,47 @@
 use crate::error::{Result, LazarusError};
 use crate::storage::backend::StorageBackend;
 use async_trait::async_trait;
+use ssh2::Session;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// SSH/SFTP storage backend
-/// This is a placeholder implementation. For production use, consider using:
-/// - ssh2-rs for direct SSH connections
-/// - async-ssh2-tokio for async SSH
-/// - russh for pure Rust SSH implementation
 pub struct SshStorage {
     host: String,
     port: u16,
     username: String,
+    key_path: Option<PathBuf>,
+    password: Option<String>,
     remote_path: PathBuf,
+    // Connection is wrapped in Arc<Mutex<>> for thread-safe shared access
+    session: Arc<Mutex<Option<Session>>>,
 }
 
 impl SshStorage {
-    /// Create a new SSH storage backend
+    /// Create a new SSH storage backend with password authentication
     pub async fn new(
         host: String,
         port: u16,
         username: String,
+        password: String,
         remote_path: PathBuf,
     ) -> Result<Self> {
-        // In a full implementation:
-        // 1. Establish SSH connection
-        // 2. Authenticate (key-based or password)
-        // 3. Verify remote path exists or create it
-
-        Ok(Self {
+        let storage = Self {
             host,
             port,
             username,
+            key_path: None,
+            password: Some(password),
             remote_path,
-        })
+            session: Arc::new(Mutex::new(None)),
+        };
+
+        // Test connection
+        storage.connect()?;
+
+        Ok(storage)
     }
 
     /// Create a new SSH storage backend with key authentication
@@ -41,148 +49,190 @@ impl SshStorage {
         host: String,
         port: u16,
         username: String,
-        _key_path: PathBuf,
+        key_path: PathBuf,
         remote_path: PathBuf,
     ) -> Result<Self> {
-        // In a full implementation:
-        // 1. Load private key from key_path
-        // 2. Establish SSH connection
-        // 3. Authenticate with key
-        // 4. Verify remote path
-
-        Ok(Self {
+        let storage = Self {
             host,
             port,
             username,
+            key_path: Some(key_path),
+            password: None,
             remote_path,
-        })
+            session: Arc::new(Mutex::new(None)),
+        };
+
+        // Test connection
+        storage.connect()?;
+
+        Ok(storage)
+    }
+
+    /// Establish SSH connection
+    fn connect(&self) -> Result<()> {
+        let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port))
+            .map_err(|e| LazarusError::Storage(format!("Failed to connect to SSH server: {}", e)))?;
+
+        let mut sess = Session::new()
+            .map_err(|e| LazarusError::Storage(format!("Failed to create SSH session: {}", e)))?;
+
+        sess.set_tcp_stream(tcp);
+        sess.handshake()
+            .map_err(|e| LazarusError::Storage(format!("SSH handshake failed: {}", e)))?;
+
+        // Authenticate
+        if let Some(ref key_path) = self.key_path {
+            sess.userauth_pubkey_file(&self.username, None, key_path, None)
+                .map_err(|e| LazarusError::Storage(format!("SSH key authentication failed: {}", e)))?;
+        } else if let Some(ref password) = self.password {
+            sess.userauth_password(&self.username, password)
+                .map_err(|e| LazarusError::Storage(format!("SSH password authentication failed: {}", e)))?;
+        } else {
+            return Err(LazarusError::Storage(
+                "No authentication method provided".to_string(),
+            ));
+        }
+
+        if !sess.authenticated() {
+            return Err(LazarusError::Storage("SSH authentication failed".to_string()));
+        }
+
+        // Store session
+        let mut session_guard = self.session.lock().unwrap();
+        *session_guard = Some(sess);
+
+        Ok(())
+    }
+
+    /// Get or create a valid SFTP session
+    /// Note: Since ssh2::Session doesn't implement Clone, we create a new connection each time.
+    /// For production use, implement a connection pool.
+    fn get_session(&self) -> Result<Session> {
+        let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port))
+            .map_err(|e| LazarusError::Storage(format!("Failed to connect: {}", e)))?;
+        let mut sess = Session::new()
+            .map_err(|e| LazarusError::Storage(format!("Failed to create session: {}", e)))?;
+        sess.set_tcp_stream(tcp);
+        sess.handshake()
+            .map_err(|e| LazarusError::Storage(format!("Handshake failed: {}", e)))?;
+
+        if let Some(ref key_path) = self.key_path {
+            sess.userauth_pubkey_file(&self.username, None, key_path, None)
+                .map_err(|e| LazarusError::Storage(format!("Auth failed: {}", e)))?;
+        } else if let Some(ref password) = self.password {
+            sess.userauth_password(&self.username, password)
+                .map_err(|e| LazarusError::Storage(format!("Auth failed: {}", e)))?;
+        }
+
+        Ok(sess)
     }
 
     fn get_remote_path(&self, key: &str) -> PathBuf {
-        self.remote_path.join(key)
+        self.remote_path.join(key.trim_start_matches('/'))
     }
 }
 
 #[async_trait]
 impl StorageBackend for SshStorage {
-    async fn put(&self, key: &str, _data: &[u8]) -> Result<()> {
-        // Placeholder implementation
-        // In production:
-        // 1. Open SFTP session
-        // 2. Create remote file
-        // 3. Write data
-        // 4. Close file
+    async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        let sess = self.get_session()?;
+        let sftp = sess
+            .sftp()
+            .map_err(|e| LazarusError::Storage(format!("Failed to open SFTP session: {}", e)))?;
 
-        let _remote_path = self.get_remote_path(key);
+        let remote_path = self.get_remote_path(key);
 
-        Err(LazarusError::Storage(
-            "SSH storage backend not yet fully implemented. \
-             This is a placeholder for Phase 2+. \
-             Consider using: ssh2-rs, async-ssh2-tokio, or russh crates."
-                .to_string(),
-        ))
+        // Create parent directories if needed
+        if let Some(parent) = remote_path.parent() {
+            let _ = sftp.mkdir(parent, 0o755); // Ignore error if directory exists
+        }
+
+        let mut file = sftp
+            .create(&remote_path)
+            .map_err(|e| LazarusError::Storage(format!("Failed to create remote file: {}", e)))?;
+
+        file.write_all(data)
+            .map_err(|e| LazarusError::Storage(format!("Failed to write data: {}", e)))?;
+
+        Ok(())
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
-        // Placeholder implementation
-        // In production:
-        // 1. Open SFTP session
-        // 2. Open remote file
-        // 3. Read data
-        // 4. Close file
+        let sess = self.get_session()?;
+        let sftp = sess
+            .sftp()
+            .map_err(|e| LazarusError::Storage(format!("Failed to open SFTP session: {}", e)))?;
 
-        let _remote_path = self.get_remote_path(key);
+        let remote_path = self.get_remote_path(key);
 
-        Err(LazarusError::Storage(
-            "SSH storage backend not yet fully implemented".to_string(),
-        ))
+        let mut file = sftp
+            .open(&remote_path)
+            .map_err(|e| LazarusError::Storage(format!("Failed to open remote file: {}", e)))?;
+
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)
+            .map_err(|e| LazarusError::Storage(format!("Failed to read data: {}", e)))?;
+
+        Ok(data)
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        // Placeholder implementation
-        // In production:
-        // 1. Open SFTP session
-        // 2. Delete remote file
+        let sess = self.get_session()?;
+        let sftp = sess
+            .sftp()
+            .map_err(|e| LazarusError::Storage(format!("Failed to open SFTP session: {}", e)))?;
 
-        let _remote_path = self.get_remote_path(key);
+        let remote_path = self.get_remote_path(key);
 
-        Err(LazarusError::Storage(
-            "SSH storage backend not yet fully implemented".to_string(),
-        ))
+        sftp.unlink(&remote_path)
+            .map_err(|e| LazarusError::Storage(format!("Failed to delete file: {}", e)))?;
+
+        Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        // Placeholder implementation
-        // In production:
-        // 1. Open SFTP session
-        // 2. List directory
-        // 3. Filter by prefix
-        // 4. Return file paths
+        let sess = self.get_session()?;
+        let sftp = sess
+            .sftp()
+            .map_err(|e| LazarusError::Storage(format!("Failed to open SFTP session: {}", e)))?;
 
-        let _remote_prefix = self.get_remote_path(prefix);
+        let remote_prefix = self.get_remote_path(prefix);
 
-        Err(LazarusError::Storage(
-            "SSH storage backend not yet fully implemented".to_string(),
-        ))
+        let entries = sftp
+            .readdir(&remote_prefix)
+            .map_err(|e| LazarusError::Storage(format!("Failed to list directory: {}", e)))?;
+
+        let mut result = Vec::new();
+        for (path, stat) in entries {
+            if stat.is_file() {
+                if let Some(path_str) = path.to_str() {
+                    result.push(path_str.to_string());
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
-
-/*
- * Full implementation example using ssh2-rs:
- *
- * Add to Cargo.toml:
- * ssh2 = "0.9"
- *
- * use ssh2::Session;
- * use std::net::TcpStream;
- *
- * impl SshStorage {
- *     async fn connect(&self) -> Result<Session> {
- *         let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port))?;
- *         let mut sess = Session::new()?;
- *         sess.set_tcp_stream(tcp);
- *         sess.handshake()?;
- *
- *         // Authenticate with key
- *         sess.userauth_pubkey_file(&self.username, None, Path::new(&key_path), None)?;
- *
- *         Ok(sess)
- *     }
- * }
- *
- * async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
- *     let sess = self.connect().await?;
- *     let sftp = sess.sftp()?;
- *
- *     let remote_path = self.get_remote_path(key);
- *     if let Some(parent) = remote_path.parent() {
- *         sftp.mkdir(parent, 0o755).ok(); // Ignore errors if exists
- *     }
- *
- *     let mut file = sftp.create(&remote_path)?;
- *     std::io::copy(&mut &data[..], &mut file)?;
- *
- *     Ok(())
- * }
- */
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_ssh_storage_placeholder() {
-        let storage = SshStorage::new(
+    async fn test_ssh_storage_creation() {
+        // This test requires a real SSH server, so we just test the structure
+        // In a real environment, you'd use a test SSH server or mock
+        let result = SshStorage::new(
             "example.com".to_string(),
             22,
             "user".to_string(),
+            "password".to_string(),
             PathBuf::from("/backups"),
         )
-        .await
-        .unwrap();
+        .await;
 
-        // Should return error for unimplemented methods
-        assert!(storage.put("test", b"data").await.is_err());
-        assert!(storage.get("test").await.is_err());
+        // Should fail to connect to non-existent server
+        assert!(result.is_err());
     }
 }

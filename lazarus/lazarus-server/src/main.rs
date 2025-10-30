@@ -6,11 +6,11 @@ use tracing::info;
 mod agent_manager;
 mod grpc;
 mod job_scheduler;
-mod proto;
 
 use agent_manager::AgentManager;
 use grpc::{AgentServiceImpl, ChunkServiceImpl};
 use job_scheduler::JobScheduler;
+use lazarus_common::lazarus::agent::{agent_service_server, chunk_service_server};
 
 #[derive(Parser)]
 #[command(author, version, about = "Lazarus Backup Server", long_about = None)]
@@ -71,8 +71,8 @@ async fn start_server(address: &str, data_dir: &str) -> Result<(), Box<dyn std::
 
     // Start gRPC server
     Server::builder()
-        .add_service(proto::agent_service_server::AgentServiceServer::new(agent_service))
-        .add_service(proto::chunk_service_server::ChunkServiceServer::new(chunk_service))
+        .add_service(agent_service_server::AgentServiceServer::new(agent_service))
+        .add_service(chunk_service_server::ChunkServiceServer::new(chunk_service))
         .serve(addr)
         .await?;
 

@@ -262,4 +262,207 @@ impl CatalogIndex {
 
         Ok((chunk_count as usize, object_count as usize, snapshot_count as usize))
     }
+
+    /// List all chunk hashes in the catalog
+    pub fn list_all_chunk_hashes(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT hash FROM Chunks")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let chunks = stmt.query_map([], |row| row.get(0))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for chunk in chunks {
+            result.push(chunk.map_err(|e| LazarusError::DatabaseError(e.to_string()))?);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_catalog() -> CatalogIndex {
+        // Create an in-memory database for testing
+        let conn = Connection::open_in_memory().unwrap();
+        let catalog = CatalogIndex { conn };
+        catalog.init_schema().unwrap();
+        catalog
+    }
+
+    #[test]
+    fn test_chunk_operations() {
+        let catalog = create_test_catalog();
+
+        // Insert a chunk
+        let hash = "abc123";
+        catalog.upsert_chunk(hash, 100, 200).unwrap();
+
+        // Check if chunk exists
+        assert!(catalog.chunk_exists(hash).unwrap());
+
+        // Check non-existent chunk
+        assert!(!catalog.chunk_exists("nonexistent").unwrap());
+
+        // Upsert same chunk again (should not error)
+        catalog.upsert_chunk(hash, 100, 200).unwrap();
+    }
+
+    #[test]
+    fn test_object_operations() {
+        let catalog = create_test_catalog();
+
+        // Create a file object
+        let metadata = b"encrypted metadata";
+        let file_id = catalog.create_object(ObjectType::File, metadata).unwrap();
+        assert!(file_id > 0);
+
+        // Create a directory object
+        let dir_id = catalog.create_object(ObjectType::Directory, metadata).unwrap();
+        assert!(dir_id > 0);
+        assert_ne!(file_id, dir_id);
+
+        // Retrieve file object
+        let (obj_type, obj_metadata) = catalog.get_object(file_id).unwrap().unwrap();
+        assert_eq!(obj_type, ObjectType::File);
+        assert_eq!(obj_metadata, metadata);
+
+        // Retrieve directory object
+        let (obj_type, _) = catalog.get_object(dir_id).unwrap().unwrap();
+        assert_eq!(obj_type, ObjectType::Directory);
+
+        // Non-existent object
+        assert!(catalog.get_object(9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_tree_operations() {
+        let catalog = create_test_catalog();
+
+        // Create parent and child objects
+        let parent_id = catalog.create_object(ObjectType::Directory, b"parent").unwrap();
+        let child_id = catalog.create_object(ObjectType::File, b"child").unwrap();
+
+        // Add tree entry
+        let encrypted_name = b"encrypted_filename";
+        catalog.add_tree_entry(parent_id, child_id, encrypted_name).unwrap();
+
+        // Get children
+        let children = catalog.get_tree_children(parent_id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, child_id);
+        assert_eq!(children[0].1, encrypted_name);
+    }
+
+    #[test]
+    fn test_file_chunks() {
+        let catalog = create_test_catalog();
+
+        // Create chunks
+        catalog.upsert_chunk("chunk1", 100, 200).unwrap();
+        catalog.upsert_chunk("chunk2", 150, 250).unwrap();
+        catalog.upsert_chunk("chunk3", 120, 220).unwrap();
+
+        // Create file object
+        let file_id = catalog.create_object(ObjectType::File, b"file").unwrap();
+
+        // Add file chunks in specific order
+        catalog.add_file_chunk(file_id, "chunk1", 0).unwrap();
+        catalog.add_file_chunk(file_id, "chunk2", 1).unwrap();
+        catalog.add_file_chunk(file_id, "chunk3", 2).unwrap();
+
+        // Retrieve file chunks
+        let chunks = catalog.get_file_chunks(file_id).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], "chunk1");
+        assert_eq!(chunks[1], "chunk2");
+        assert_eq!(chunks[2], "chunk3");
+    }
+
+    #[test]
+    fn test_snapshot_operations() {
+        let catalog = create_test_catalog();
+
+        // Create root object
+        let root_id = catalog.create_object(ObjectType::Directory, b"root").unwrap();
+
+        // Create snapshot
+        let snapshot_id = "snapshot-123";
+        let timestamp = 1234567890u64;
+        let metadata = b"snapshot metadata";
+        catalog.create_snapshot(snapshot_id, timestamp, root_id, metadata).unwrap();
+
+        // List snapshots
+        let snapshots = catalog.list_snapshots().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, snapshot_id);
+        assert_eq!(snapshots[0].1, timestamp);
+
+        // Get snapshot details
+        let (retrieved_root_id, retrieved_metadata) = catalog.get_snapshot(snapshot_id).unwrap().unwrap();
+        assert_eq!(retrieved_root_id, root_id);
+        assert_eq!(retrieved_metadata, metadata);
+
+        // Non-existent snapshot
+        assert!(catalog.get_snapshot("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_stats() {
+        let catalog = create_test_catalog();
+
+        // Initially empty
+        let (chunks, objects, snapshots) = catalog.get_stats().unwrap();
+        assert_eq!(chunks, 0);
+        assert_eq!(objects, 0);
+        assert_eq!(snapshots, 0);
+
+        // Add some data
+        catalog.upsert_chunk("chunk1", 100, 200).unwrap();
+        catalog.upsert_chunk("chunk2", 150, 250).unwrap();
+        let obj_id = catalog.create_object(ObjectType::File, b"file").unwrap();
+        catalog.create_snapshot("snap1", 123, obj_id, b"meta").unwrap();
+
+        // Check stats
+        let (chunks, objects, snapshots) = catalog.get_stats().unwrap();
+        assert_eq!(chunks, 2);
+        assert_eq!(objects, 1);
+        assert_eq!(snapshots, 1);
+    }
+
+    #[test]
+    fn test_list_all_chunk_hashes() {
+        let catalog = create_test_catalog();
+
+        // Add multiple chunks
+        catalog.upsert_chunk("hash1", 100, 200).unwrap();
+        catalog.upsert_chunk("hash2", 150, 250).unwrap();
+        catalog.upsert_chunk("hash3", 120, 220).unwrap();
+
+        // List all hashes
+        let hashes = catalog.list_all_chunk_hashes().unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert!(hashes.contains(&"hash1".to_string()));
+        assert!(hashes.contains(&"hash2".to_string()));
+        assert!(hashes.contains(&"hash3".to_string()));
+    }
+
+    #[test]
+    fn test_multiple_snapshots_ordering() {
+        let catalog = create_test_catalog();
+
+        // Create multiple snapshots with different timestamps
+        let root_id = catalog.create_object(ObjectType::Directory, b"root").unwrap();
+
+        catalog.create_snapshot("snap1", 1000, root_id, b"meta1").unwrap();
+        catalog.create_snapshot("snap2", 3000, root_id, b"meta2").unwrap();
+        catalog.create_snapshot("snap3", 2000, root_id, b"meta3").unwrap();
+
+        // List should be ordered by timestamp (descending)
+        let snapshots = catalog.list_snapshots().unwrap();
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].0, "snap2"); // timestamp 3000
+        assert_eq!(snapshots[1].0, "snap3"); // timestamp 2000
+        assert_eq!(snapshots[2].0, "snap1"); // timestamp 1000
+    }
 }

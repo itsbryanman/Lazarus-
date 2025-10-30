@@ -12,6 +12,8 @@ pub enum LazarusError {
     DatabaseError(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Verification failed: {0}")]
+    VerificationFailed(String),
     #[error("Unknown error")]
     Unknown,
 }

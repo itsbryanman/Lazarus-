@@ -226,3 +226,127 @@ impl KeyManager {
             .map_err(|_| LazarusError::EncryptionError("Invalid UTF-8 in metadata".into()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_and_unlock() {
+        // Create a new repository
+        let password = "test_password_12345";
+        let (manager1, config) = KeyManager::init_repository(password).unwrap();
+
+        // Unlock the repository with the same password
+        let manager2 = KeyManager::unlock_repository(password, &config).unwrap();
+
+        // Keys should be equal
+        assert_eq!(manager1.get_repo_key(), manager2.get_repo_key());
+        assert_eq!(manager1.get_metadata_key(), manager2.get_metadata_key());
+    }
+
+    #[test]
+    fn test_unlock_wrong_password() {
+        // Create a new repository
+        let password = "correct_password";
+        let (_manager, config) = KeyManager::init_repository(password).unwrap();
+
+        // Try to unlock with wrong password
+        let wrong_password = "wrong_password";
+        let result = KeyManager::unlock_repository(wrong_password, &config);
+
+        // Should fail
+        assert!(result.is_err());
+        match result {
+            Err(LazarusError::EncryptionError(msg)) => {
+                assert!(msg.contains("wrong password") || msg.contains("decrypt"));
+            }
+            _ => panic!("Expected EncryptionError"),
+        }
+    }
+
+    #[test]
+    fn test_data_encryption_roundtrip() {
+        // Create a key manager
+        let password = "test_password";
+        let (manager, _config) = KeyManager::init_repository(password).unwrap();
+
+        // Test data
+        let original_data = b"This is some test data that should be encrypted and decrypted correctly!";
+
+        // Encrypt
+        let (encrypted, nonce) = manager.encrypt_data(original_data).unwrap();
+
+        // Verify encrypted data is different from original
+        assert_ne!(&encrypted[..], &original_data[..]);
+
+        // Decrypt
+        let decrypted = manager.decrypt_data(&encrypted, &nonce).unwrap();
+
+        // Verify decrypted matches original
+        assert_eq!(&decrypted[..], &original_data[..]);
+    }
+
+    #[test]
+    fn test_metadata_encryption_roundtrip() {
+        // Create a key manager
+        let password = "test_password";
+        let (manager, _config) = KeyManager::init_repository(password).unwrap();
+
+        // Test metadata
+        let original_metadata = "test_file.txt";
+
+        // Encrypt
+        let (encrypted, nonce) = manager.encrypt_metadata(original_metadata).unwrap();
+
+        // Decrypt
+        let decrypted = manager.decrypt_metadata(&encrypted, &nonce).unwrap();
+
+        // Verify decrypted matches original
+        assert_eq!(decrypted, original_metadata);
+    }
+
+    #[test]
+    fn test_different_nonces_produce_different_ciphertexts() {
+        // Create a key manager
+        let password = "test_password";
+        let (manager, _config) = KeyManager::init_repository(password).unwrap();
+
+        // Same plaintext
+        let data = b"same data";
+
+        // Encrypt twice
+        let (encrypted1, nonce1) = manager.encrypt_data(data).unwrap();
+        let (encrypted2, nonce2) = manager.encrypt_data(data).unwrap();
+
+        // Nonces should be different
+        assert_ne!(nonce1, nonce2);
+
+        // Ciphertexts should be different (due to different nonces)
+        assert_ne!(encrypted1, encrypted2);
+
+        // But both should decrypt to same plaintext
+        let decrypted1 = manager.decrypt_data(&encrypted1, &nonce1).unwrap();
+        let decrypted2 = manager.decrypt_data(&encrypted2, &nonce2).unwrap();
+        assert_eq!(decrypted1, decrypted2);
+        assert_eq!(&decrypted1[..], data);
+    }
+
+    #[test]
+    fn test_decrypt_with_wrong_nonce_fails() {
+        // Create a key manager
+        let password = "test_password";
+        let (manager, _config) = KeyManager::init_repository(password).unwrap();
+
+        // Encrypt data
+        let data = b"test data";
+        let (encrypted, _correct_nonce) = manager.encrypt_data(data).unwrap();
+
+        // Try to decrypt with wrong nonce
+        let wrong_nonce = vec![0u8; 12];
+        let result = manager.decrypt_data(&encrypted, &wrong_nonce);
+
+        // Should fail
+        assert!(result.is_err());
+    }
+}

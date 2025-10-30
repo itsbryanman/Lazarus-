@@ -1,14 +1,18 @@
-use crate::proto::*;
+use lazarus_common::lazarus::agent::*;
+use lazarus_core::storage::backend::StorageBackend;
+use lazarus_core::storage::local::LocalStorage;
+use std::path::Path;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 pub struct ChunkServiceImpl {
-    data_dir: String,
+    storage: LocalStorage,
 }
 
 impl ChunkServiceImpl {
     pub fn new(data_dir: String) -> Self {
-        Self { data_dir }
+        let storage = LocalStorage::new(Path::new(&data_dir).join("data"));
+        Self { storage }
     }
 }
 
@@ -19,13 +23,17 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
         request: Request<tonic::Streaming<ChunkHash>>,
     ) -> Result<Response<Self::CheckChunksExistStream>, Status> {
         let mut stream = request.into_inner();
+        let storage = self.storage.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(async move {
             while let Ok(Some(chunk_hash)) = stream.message().await {
-                // In a real implementation, check if chunk exists in storage
-                let exists = false; // Placeholder
+                let shard_dir = &chunk_hash.hash[..2];
+                let key = format!("{}/{}", shard_dir, chunk_hash.hash);
+
+                // Use `storage.get` to check existence. `get` returns an error if not found.
+                let exists = storage.get(&key).await.is_ok();
 
                 let response = ChunkExistenceResponse {
                     hash: chunk_hash.hash,
@@ -55,8 +63,19 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
 
         while let Some(chunk) = stream.message().await? {
             info!("Received chunk upload: {}", chunk.hash);
-            // In a real implementation, save chunk to storage
-            chunks_uploaded += 1;
+            let shard_dir = &chunk.hash[..2];
+            let key = format!("{}/{}", shard_dir, chunk.hash);
+
+            // Save the chunk using the storage backend
+            if let Err(e) = self.storage.put(&key, &chunk.data).await {
+                warn!("Failed to store chunk {}: {}", chunk.hash, e);
+                return Ok(Response::new(ChunkUploadResponse {
+                    chunks_uploaded,
+                    success: false,
+                }));
+            } else {
+                chunks_uploaded += 1;
+            }
         }
 
         Ok(Response::new(ChunkUploadResponse {
@@ -69,16 +88,27 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
         &self,
         request: Request<ChunkDownloadRequest>,
     ) -> Result<Response<Self::DownloadChunkStream>, Status> {
-        let _req = request.into_inner();
-
-        // In a real implementation, read chunk from storage
-        warn!("Chunk download not yet fully implemented");
+        let req = request.into_inner();
+        let storage = self.storage.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(async move {
-            // Placeholder
-            let _ = tx.send(Ok(ChunkData { data: vec![] })).await;
+            let shard_dir = &req.hash[..2];
+            let key = format!("{}/{}", shard_dir, req.hash);
+
+            match storage.get(&key).await {
+                Ok(data) => {
+                    // Send the data in one go (for simplicity)
+                    // For large chunks, this could be streamed in smaller parts
+                    let _ = tx.send(Ok(ChunkData { data })).await;
+                }
+                Err(e) => {
+                    warn!("Failed to retrieve chunk {}: {}", req.hash, e);
+                    let status = Status::not_found(format!("Chunk {} not found: {}", req.hash, e));
+                    let _ = tx.send(Err(status)).await;
+                }
+            }
         });
 
         Ok(Response::new(

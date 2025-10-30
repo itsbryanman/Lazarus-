@@ -3,5 +3,8 @@ resolver = "2"
 members = [
     "lazarus-core",
     "lazarus-cli",
-    "lazarus-recovery", "lazarus-server",
+    "lazarus-recovery",
+    "lazarus-server",
+    "lazarus-common",
+    "lazarus-agent",
 ]

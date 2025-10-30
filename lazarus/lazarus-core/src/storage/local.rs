@@ -4,6 +4,7 @@ use tokio::fs;
 use crate::error::{Error, Result};
 use super::backend::StorageBackend;
 
+#[derive(Clone)]
 pub struct LocalStorage {
     path: PathBuf,
 }

@@ -1,6 +1,6 @@
 use crate::agent_manager::{AgentManager, AgentStatus};
 use crate::job_scheduler::{JobScheduler, JobType};
-use crate::proto::*;
+use lazarus_common::lazarus::agent::*;
 use std::collections::HashMap;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};

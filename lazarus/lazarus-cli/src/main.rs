@@ -36,14 +36,8 @@ async fn main() {
         Commands::Backup(args) => commands::backup::backup(args).await,
         Commands::Restore(args) => commands::restore::restore(args).await,
         Commands::List(args) => commands::list::list(args).await,
-        Commands::Verify(_args) => {
-            println!("Verify command not yet implemented");
-            Ok(())
-        }
-        Commands::Config(_args) => {
-            println!("Config command not yet implemented");
-            Ok(())
-        }
+        Commands::Verify(args) => commands::verify::verify(args).await,
+        Commands::Config(args) => commands::config::config(args).await,
     };
 
     if let Err(e) = result {
