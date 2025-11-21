@@ -1,10 +1,15 @@
 use clap::Args;
+use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
+use lazarus_core::compression::adaptive;
+use lazarus_core::config::ConfigManager;
+use lazarus_core::error::{LazarusError, Result};
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
-use lazarus_core::error::Result;
-use lazarus_core::config::ConfigManager;
-use lazarus_core::catalog::index::{CatalogIndex, ObjectType, ObjectMetadata};
+#[cfg(unix)]
+use libc;
 use std::path::Path;
+#[cfg(unix)]
+use std::{ffi::CString, os::unix::ffi::OsStrExt, os::unix::fs::PermissionsExt};
 
 #[derive(Args)]
 pub struct RestoreArgs {
@@ -35,27 +40,46 @@ pub async fn restore(args: &RestoreArgs) -> Result<()> {
     let storage = LocalStorage::new(config_mgr.data_path());
 
     // Get snapshot details
-    let snapshot_data = catalog.get_snapshot(&args.snapshot)?
-        .ok_or_else(|| lazarus_core::error::LazarusError::Storage(
-            format!("Snapshot '{}' not found", args.snapshot)
-        ))?;
+    let snapshot_data = catalog.get_snapshot(&args.snapshot)?.ok_or_else(|| {
+        lazarus_core::error::LazarusError::Storage(format!(
+            "Snapshot '{}' not found",
+            args.snapshot
+        ))
+    })?;
 
     let (root_object_id, _encrypted_metadata) = snapshot_data;
 
     // Get root object
-    let (obj_type, encrypted_obj_metadata) = catalog.get_object(root_object_id)?
-        .ok_or_else(|| lazarus_core::error::LazarusError::Storage(
-            "Root object not found".to_string()
-        ))?;
+    let (obj_type, encrypted_obj_metadata) =
+        catalog.get_object(root_object_id)?.ok_or_else(|| {
+            lazarus_core::error::LazarusError::Storage("Root object not found".to_string())
+        })?;
+    let root_metadata = decrypt_object_metadata(&key_manager, &encrypted_obj_metadata)?;
 
     // Restore from root
     let dest_path = Path::new(&args.destination);
     match obj_type {
         ObjectType::File => {
-            restore_file(&key_manager, &catalog, &storage, root_object_id, dest_path).await?;
+            restore_file(
+                &key_manager,
+                &catalog,
+                &storage,
+                root_object_id,
+                root_metadata,
+                dest_path,
+            )
+            .await?;
         }
         ObjectType::Directory => {
-            restore_directory(&key_manager, &catalog, &storage, root_object_id, dest_path).await?;
+            restore_directory(
+                &key_manager,
+                &catalog,
+                &storage,
+                root_object_id,
+                root_metadata,
+                dest_path,
+            )
+            .await?;
         }
     }
 
@@ -69,6 +93,7 @@ async fn restore_file(
     catalog: &CatalogIndex,
     storage: &LocalStorage,
     file_object_id: i64,
+    metadata: ObjectMetadata,
     dest_path: &Path,
 ) -> Result<()> {
     // Get file chunks in order
@@ -84,7 +109,7 @@ async fn restore_file(
         // Extract nonce (first 12 bytes) and encrypted data
         if stored_data.len() < 12 {
             return Err(lazarus_core::error::LazarusError::EncryptionError(
-                "Stored chunk too small".to_string()
+                "Stored chunk too small".to_string(),
             ));
         }
 
@@ -92,10 +117,10 @@ async fn restore_file(
         let encrypted_chunk = &stored_data[12..];
 
         // Decrypt chunk
-        let compressed_chunk = key_manager.decrypt_data(encrypted_chunk, nonce)?;
+        let encoded_chunk = key_manager.decrypt_data(encrypted_chunk, nonce)?;
 
-        // Decompress chunk
-        let chunk = zstd::decode_all(&compressed_chunk[..])?;
+        // Decode chunk (handles adaptive compression header)
+        let chunk = adaptive::decode_chunk(&encoded_chunk)?;
 
         file_data.extend_from_slice(&chunk);
     }
@@ -105,6 +130,7 @@ async fn restore_file(
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(dest_path, &file_data).await?;
+    apply_metadata(dest_path, &metadata).await?;
 
     println!("  ✓ Restored file: {}", dest_path.display());
 
@@ -116,10 +142,12 @@ async fn restore_directory(
     catalog: &CatalogIndex,
     storage: &LocalStorage,
     dir_object_id: i64,
+    metadata: ObjectMetadata,
     dest_path: &Path,
 ) -> Result<()> {
     // Create destination directory
     tokio::fs::create_dir_all(dest_path).await?;
+    apply_metadata(dest_path, &metadata).await?;
 
     println!("  ✓ Restored directory: {}/", dest_path.display());
 
@@ -140,10 +168,10 @@ async fn restore_directory(
         let child_name = key_manager.decrypt_metadata(encrypted, nonce)?;
 
         // Get child object
-        let (child_type, _) = catalog.get_object(child_id)?
-            .ok_or_else(|| lazarus_core::error::LazarusError::Storage(
-                "Child object not found".to_string()
-            ))?;
+        let (child_type, child_metadata_blob) = catalog.get_object(child_id)?.ok_or_else(|| {
+            lazarus_core::error::LazarusError::Storage("Child object not found".to_string())
+        })?;
+        let child_metadata = decrypt_object_metadata(key_manager, &child_metadata_blob)?;
 
         // Build child path
         let child_path = dest_path.join(&child_name);
@@ -151,13 +179,90 @@ async fn restore_directory(
         // Recursively restore child
         match child_type {
             ObjectType::File => {
-                restore_file(key_manager, catalog, storage, child_id, &child_path).await?;
+                restore_file(
+                    key_manager,
+                    catalog,
+                    storage,
+                    child_id,
+                    child_metadata,
+                    &child_path,
+                )
+                .await?;
             }
             ObjectType::Directory => {
-                Box::pin(restore_directory(key_manager, catalog, storage, child_id, &child_path)).await?;
+                Box::pin(restore_directory(
+                    key_manager,
+                    catalog,
+                    storage,
+                    child_id,
+                    child_metadata,
+                    &child_path,
+                ))
+                .await?;
             }
         }
     }
 
     Ok(())
+}
+
+fn decrypt_object_metadata(
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    blob: &[u8],
+) -> Result<ObjectMetadata> {
+    if blob.len() < 12 {
+        let fallback = String::from_utf8(blob.to_vec())
+            .map_err(|_| LazarusError::EncryptionError("Invalid metadata encoding".into()))?;
+        return serde_json::from_str(&fallback)
+            .map_err(|e| LazarusError::SerializationError(e.to_string()));
+    }
+
+    let nonce = &blob[..12];
+    let encrypted_metadata = &blob[12..];
+    let metadata_json = key_manager.decrypt_metadata(encrypted_metadata, nonce)?;
+    serde_json::from_str(&metadata_json)
+        .map_err(|e| LazarusError::SerializationError(e.to_string()))
+}
+
+#[cfg(unix)]
+async fn apply_metadata(path: &Path, metadata: &ObjectMetadata) -> Result<()> {
+    use std::fs::Permissions;
+
+    if let Err(err) = tokio::fs::set_permissions(path, Permissions::from_mode(metadata.mode)).await
+    {
+        eprintln!(
+            "Warning: failed to set permissions on {}: {}",
+            path.display(),
+            err
+        );
+    }
+
+    if let Err(err) = chown_path(path, metadata.uid, metadata.gid) {
+        eprintln!(
+            "Warning: failed to set ownership on {}: {}",
+            path.display(),
+            err
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn apply_metadata(_path: &Path, _metadata: &ObjectMetadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chown_path(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::io::{self, ErrorKind};
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+    let res = unsafe { libc::chown(c_path.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) };
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }

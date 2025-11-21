@@ -23,10 +23,11 @@ struct ClientConfig {
 
 impl ClientConfig {
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| lazarus_core::error::LazarusError::Storage(
-                "Unable to determine config directory".to_string()
-            ))?;
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            lazarus_core::error::LazarusError::Storage(
+                "Unable to determine config directory".to_string(),
+            )
+        })?;
 
         let lazarus_config = config_dir.join("lazarus");
         std::fs::create_dir_all(&lazarus_config)?;

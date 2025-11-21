@@ -24,6 +24,7 @@ Lazarus is a modern, high-performance backup and disaster recovery solution desi
 ### Advanced Features
 
 - **Snapshot Management** - Point-in-time recovery with complete snapshot metadata
+- **Immutable Backups** - Enforce retention with S3 Object Lock and filesystem immutability
 - **Directory Tree Preservation** - Full directory structure backup and restoration
 - **Job Orchestration** - Schedule and coordinate backups across multiple agents
 - **Progress Tracking** - Real-time backup and restore progress monitoring
@@ -115,6 +116,16 @@ lazarus-cli list --repo /backup/repo
 # - Number of objects (files/directories)
 # - Total size
 # - Unique data size (after deduplication)
+```
+
+### Configure Immutable Retention
+
+```bash
+# Enable immutable backups for 90 days in governance mode
+lazarus-cli retention --repository /backup/repo --enable --mode governance --min-retention-days 90 --legal-hold true
+
+# View the active retention policy
+lazarus-cli retention --repository /backup/repo
 ```
 
 ### Restore Data

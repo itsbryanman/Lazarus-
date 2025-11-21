@@ -1,5 +1,5 @@
 use lazarus_common::lazarus::agent::*;
-use lazarus_core::storage::backend::StorageBackend;
+use lazarus_core::storage::backend::{RetentionLock, StorageBackend};
 use lazarus_core::storage::local::LocalStorage;
 use std::path::Path;
 use tonic::{Request, Response, Status};
@@ -7,12 +7,16 @@ use tracing::{info, warn};
 
 pub struct ChunkServiceImpl {
     storage: LocalStorage,
+    retention_lock: Option<RetentionLock>,
 }
 
 impl ChunkServiceImpl {
-    pub fn new(data_dir: String) -> Self {
-        let storage = LocalStorage::new(Path::new(&data_dir).join("data"));
-        Self { storage }
+    pub fn new<P: AsRef<Path>>(data_dir: P, retention_lock: Option<RetentionLock>) -> Self {
+        let storage = LocalStorage::new(data_dir.as_ref().join("data"));
+        Self {
+            storage,
+            retention_lock,
+        }
     }
 }
 
@@ -46,9 +50,9 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
             }
         });
 
-        Ok(Response::new(
-            tokio_stream::wrappers::ReceiverStream::new(rx),
-        ))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     type CheckChunksExistStream =
@@ -67,7 +71,11 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
             let key = format!("{}/{}", shard_dir, chunk.hash);
 
             // Save the chunk using the storage backend
-            if let Err(e) = self.storage.put(&key, &chunk.data).await {
+            if let Err(e) = self
+                .storage
+                .write_once(&key, &chunk.data, self.retention_lock.as_ref())
+                .await
+            {
                 warn!("Failed to store chunk {}: {}", chunk.hash, e);
                 return Ok(Response::new(ChunkUploadResponse {
                     chunks_uploaded,
@@ -111,9 +119,9 @@ impl chunk_service_server::ChunkService for ChunkServiceImpl {
             }
         });
 
-        Ok(Response::new(
-            tokio_stream::wrappers::ReceiverStream::new(rx),
-        ))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     type DownloadChunkStream = tokio_stream::wrappers::ReceiverStream<Result<ChunkData, Status>>;

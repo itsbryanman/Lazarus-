@@ -1,8 +1,9 @@
+pub mod catalog;
+pub mod chunking;
+pub mod compression;
+pub mod config;
+pub mod encryption;
+pub mod error;
+pub mod security;
 pub mod snapshot;
 pub mod storage;
-pub mod compression;
-pub mod encryption;
-pub mod catalog;
-pub mod error;
-pub mod chunking;
-pub mod config;

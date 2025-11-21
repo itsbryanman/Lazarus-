@@ -1,7 +1,6 @@
 use crate::agent_manager::{AgentManager, AgentStatus};
 use crate::job_scheduler::{JobScheduler, JobType};
 use lazarus_common::lazarus::agent::*;
-use std::collections::HashMap;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
@@ -98,7 +97,10 @@ impl agent_service_server::AgentService for AgentServiceImpl {
 
         info!("Starting job: {} for agent: {}", req.job_id, req.agent_id);
 
-        let result = self.job_scheduler.start_job(&req.job_id, &req.agent_id).await;
+        let result = self
+            .job_scheduler
+            .start_job(&req.job_id, &req.agent_id)
+            .await;
 
         match result {
             Ok(_) => {
@@ -138,10 +140,7 @@ impl agent_service_server::AgentService for AgentServiceImpl {
     ) -> Result<Response<JobCompletionResponse>, Status> {
         let req = request.into_inner();
 
-        info!(
-            "Completing job: {} (success: {})",
-            req.job_id, req.success
-        );
+        info!("Completing job: {} (success: {})", req.job_id, req.success);
 
         let error_message = if req.error_message.is_empty() {
             None

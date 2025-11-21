@@ -1,6 +1,9 @@
 pub mod backup;
-pub mod restore;
-pub mod verify;
-pub mod list;
 pub mod config;
 pub mod init;
+pub mod list;
+pub mod prune;
+pub mod recover;
+pub mod restore;
+pub mod retention;
+pub mod verify;

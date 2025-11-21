@@ -1,15 +1,17 @@
 use clap::Parser;
 use lazarus_common::lazarus::agent::{
-    agent_service_client::AgentServiceClient, chunk_service_client::ChunkServiceClient,
-    ChunkHash, ChunkUpload, GetJobsRequest, HeartbeatRequest, JobCompletionRequest,
-    JobStatistics, ProgressUpdate, RegisterRequest,
+    agent_service_client::AgentServiceClient, chunk_service_client::ChunkServiceClient, ChunkHash,
+    ChunkUpload, GetJobsRequest, HeartbeatRequest, JobCompletionRequest, JobStatistics,
+    ProgressUpdate, RegisterRequest,
 };
 use lazarus_core::catalog::index::CatalogIndex;
 use lazarus_core::chunking::cdc::CdcChunker;
+use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
+use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
 use std::collections::HashMap;
 use std::path::Path;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, sleep, Duration};
 use tonic::Request;
 use tracing::{error, info, warn};
 
@@ -72,7 +74,9 @@ impl Agent {
         let heartbeat_server = self.server_address.clone();
         let heartbeat_interval = self.heartbeat_interval;
         tokio::spawn(async move {
-            if let Err(e) = run_heartbeat_loop(heartbeat_agent_id, heartbeat_server, heartbeat_interval).await {
+            if let Err(e) =
+                run_heartbeat_loop(heartbeat_agent_id, heartbeat_server, heartbeat_interval).await
+            {
                 error!("Heartbeat loop failed: {}", e);
             }
         });
@@ -235,6 +239,19 @@ impl Agent {
         let key_manager = config_mgr.open_repository(&self.password).await?;
         let catalog = CatalogIndex::new(config_mgr.database_path())?;
 
+        // Run ransomware detection before touching data
+        let detection_engine = DetectionEngine::new(config_mgr.repo_path());
+        let report = detection_engine
+            .analyze_paths(&[Path::new(source_path).to_path_buf()])
+            .await?;
+        if matches!(report.verdict, DetectionVerdict::Suspicious) {
+            warn!("Ransomware indicators detected. Aborting backup.");
+            for anomaly in report.anomalies {
+                warn!("  {:?}", anomaly);
+            }
+            return Err("Security Alert: Ransomware detected".into());
+        }
+
         // Process the file/directory
         let source = Path::new(source_path);
         if !source.exists() {
@@ -316,12 +333,18 @@ impl Agent {
             .collect();
 
         // Create stream of chunk hashes to check
-        let hash_check_data: Vec<ChunkHash> = chunk_hashes.iter().map(|h| ChunkHash { hash: h.clone() }).collect();
+        let hash_check_data: Vec<ChunkHash> = chunk_hashes
+            .iter()
+            .map(|h| ChunkHash { hash: h.clone() })
+            .collect();
         let hash_stream = tokio_stream::iter(hash_check_data);
 
         let mut chunk_client_clone = chunk_client.clone();
         let request = Request::new(hash_stream);
-        let mut response_stream = chunk_client_clone.check_chunks_exist(request).await?.into_inner();
+        let mut response_stream = chunk_client_clone
+            .check_chunks_exist(request)
+            .await?
+            .into_inner();
 
         let mut missing_chunks = Vec::new();
         while let Some(response) = response_stream.message().await? {
@@ -337,29 +360,28 @@ impl Agent {
             let hash = chunk_hashes[i].clone();
 
             if missing_chunks.contains(&hash) {
-                // Compress the chunk
-                let compressed = zstd::encode_all(&chunk_data[..], 3)?;
+                // Encode chunk with adaptive compression header
+                let encoded = adaptive::encode_chunk(chunk_data)?;
 
                 // Encrypt the chunk
-                let (encrypted, nonce) = key_manager.encrypt_data(&compressed)?;
+                let (encrypted, nonce) = key_manager.encrypt_data(&encoded)?;
+                let stored_size = encrypted.len();
 
                 // Combine nonce and encrypted data
                 let mut full_data = nonce;
                 full_data.extend_from_slice(&encrypted);
 
                 // Upload to server
-                let upload_stream = tokio_stream::iter(vec![ChunkUpload {
+                let payload = ChunkUpload {
                     hash: hash.clone(),
                     data: full_data,
                     uncompressed_size: chunk_data.len() as i32,
-                }]);
+                };
 
-                let mut chunk_client_clone = chunk_client.clone();
-                let request = Request::new(upload_stream);
-                chunk_client_clone.upload_chunk(request).await?;
+                upload_chunk_with_retry(chunk_client, payload, &hash).await?;
 
                 // Record in catalog
-                catalog.upsert_chunk(&hash, encrypted.len(), chunk_data.len())?;
+                catalog.upsert_chunk(&hash, stored_size, chunk_data.len())?;
             }
         }
 
@@ -390,6 +412,38 @@ async fn run_heartbeat_loop(
             }
             Err(e) => {
                 warn!("Failed to send heartbeat: {}", e);
+            }
+        }
+    }
+}
+
+async fn upload_chunk_with_retry(
+    chunk_client: &ChunkServiceClient<tonic::transport::Channel>,
+    payload: ChunkUpload,
+    hash: &str,
+) -> Result<(), tonic::Status> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt = 0;
+
+    loop {
+        let stream = tokio_stream::iter(vec![payload.clone()]);
+        let request = Request::new(stream);
+        let mut client = chunk_client.clone();
+
+        match client.upload_chunk(request).await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                attempt += 1;
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(err);
+                }
+
+                let backoff = Duration::from_millis(500 * (1 << (attempt - 1)));
+                warn!(
+                    "Chunk {} upload failed (attempt {}/{}). Retrying in {:?}: {}",
+                    hash, attempt, MAX_ATTEMPTS, backoff, err
+                );
+                sleep(backoff).await;
             }
         }
     }

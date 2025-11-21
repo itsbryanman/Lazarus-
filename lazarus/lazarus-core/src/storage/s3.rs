@@ -1,9 +1,14 @@
-use crate::error::{Result, LazarusError};
-use crate::storage::backend::StorageBackend;
+use crate::error::{LazarusError, Result};
+use crate::storage::backend::{RetentionLock, RetentionMode, StorageBackend};
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::primitives::ByteStream;
-use std::path::Path;
+use aws_sdk_s3::types::{
+    ObjectLockLegalHold, ObjectLockLegalHoldStatus, ObjectLockRetention, ObjectLockRetentionMode,
+};
+use aws_smithy_types::DateTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// S3-compatible storage backend
 pub struct S3Storage {
@@ -16,7 +21,7 @@ impl S3Storage {
     /// Create a new S3 storage backend
     pub async fn new(bucket: String, prefix: String) -> Result<Self> {
         // Load AWS configuration from environment
-        let config = aws_config::load_from_env().await;
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
         let client = Client::new(&config);
 
         Ok(Self {
@@ -27,8 +32,12 @@ impl S3Storage {
     }
 
     /// Create a new S3 storage backend with custom endpoint (for S3-compatible services)
-    pub async fn new_with_endpoint(bucket: String, prefix: String, endpoint: String) -> Result<Self> {
-        let config = aws_config::load_from_env().await;
+    pub async fn new_with_endpoint(
+        bucket: String,
+        prefix: String,
+        endpoint: String,
+    ) -> Result<Self> {
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
         let s3_config = aws_sdk_s3::config::Builder::from(&config)
             .endpoint_url(endpoint)
             .build();
@@ -43,11 +52,76 @@ impl S3Storage {
 
     /// Get the full S3 key for a given path
     fn get_key(&self, key: &str) -> String {
-        if self.prefix.is_empty() {
-            key.to_string()
+        format_key(&self.prefix, key)
+    }
+}
+
+fn format_key(prefix: &str, key: &str) -> String {
+    let normalized_key = key.trim_start_matches('/');
+    if prefix.is_empty() {
+        normalized_key.to_string()
+    } else {
+        format!("{}/{}", prefix.trim_end_matches('/'), normalized_key)
+    }
+}
+
+fn convert_mode(mode: RetentionMode) -> ObjectLockRetentionMode {
+    match mode {
+        RetentionMode::Governance => ObjectLockRetentionMode::Governance,
+        RetentionMode::Compliance => ObjectLockRetentionMode::Compliance,
+    }
+}
+
+fn convert_datetime(time: SystemTime) -> Result<DateTime> {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| LazarusError::Storage("Invalid retention timestamp".into()))?;
+    Ok(DateTime::from_secs(duration.as_secs() as i64))
+}
+
+impl S3Storage {
+    async fn apply_legal_hold(&self, key: &str, lock: &RetentionLock) -> Result<()> {
+        let status = if lock.legal_hold {
+            ObjectLockLegalHoldStatus::On
         } else {
-            format!("{}/{}", self.prefix.trim_end_matches('/'), key)
-        }
+            ObjectLockLegalHoldStatus::Off
+        };
+
+        let request = ObjectLockLegalHold::builder().status(status).build();
+
+        self.client
+            .put_object_legal_hold()
+            .bucket(&self.bucket)
+            .key(key)
+            .legal_hold(request)
+            .send()
+            .await
+            .map_err(|e| LazarusError::Storage(format!("S3 legal hold error: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn apply_retention(&self, key: &str, lock: &RetentionLock) -> Result<()> {
+        let retain_until = match lock.retain_until {
+            Some(time) => time,
+            None => return Ok(()),
+        };
+
+        let retention = ObjectLockRetention::builder()
+            .mode(convert_mode(lock.mode))
+            .retain_until_date(convert_datetime(retain_until)?)
+            .build();
+
+        self.client
+            .put_object_retention()
+            .bucket(&self.bucket)
+            .key(key)
+            .retention(retention)
+            .send()
+            .await
+            .map_err(|e| LazarusError::Storage(format!("S3 retention error: {e}")))?;
+
+        Ok(())
     }
 }
 
@@ -71,7 +145,8 @@ impl StorageBackend for S3Storage {
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let s3_key = self.get_key(key);
 
-        let response = self.client
+        let response = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(&s3_key)
@@ -79,7 +154,10 @@ impl StorageBackend for S3Storage {
             .await
             .map_err(|e| LazarusError::Storage(format!("S3 get error: {}", e)))?;
 
-        let data = response.body.collect().await
+        let data = response
+            .body
+            .collect()
+            .await
             .map_err(|e| LazarusError::Storage(format!("S3 body read error: {}", e)))?
             .into_bytes()
             .to_vec();
@@ -108,7 +186,8 @@ impl StorageBackend for S3Storage {
         let mut continuation_token = None;
 
         loop {
-            let mut request = self.client
+            let mut request = self
+                .client
                 .list_objects_v2()
                 .bucket(&self.bucket)
                 .prefix(&s3_prefix);
@@ -147,6 +226,20 @@ impl StorageBackend for S3Storage {
 
         Ok(results)
     }
+
+    async fn write_once(&self, key: &str, data: &[u8], lock: Option<&RetentionLock>) -> Result<()> {
+        self.put(key, data).await?;
+        if let Some(lock) = lock {
+            self.set_retention_lock(key, lock).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_retention_lock(&self, key: &str, lock: &RetentionLock) -> Result<()> {
+        let s3_key = self.get_key(key);
+        self.apply_legal_hold(&s3_key, lock).await?;
+        self.apply_retention(&s3_key, lock).await
+    }
 }
 
 #[cfg(test)]
@@ -155,21 +248,15 @@ mod tests {
 
     #[test]
     fn test_get_key() {
-        let storage = S3Storage {
-            client: Client::new(&aws_config::SdkConfig::builder().build()),
-            bucket: "test-bucket".to_string(),
-            prefix: "backups".to_string(),
-        };
-
-        assert_eq!(storage.get_key("file.txt"), "backups/file.txt");
-        assert_eq!(storage.get_key("dir/file.txt"), "backups/dir/file.txt");
-
-        let storage_no_prefix = S3Storage {
-            client: Client::new(&aws_config::SdkConfig::builder().build()),
-            bucket: "test-bucket".to_string(),
-            prefix: String::new(),
-        };
-
-        assert_eq!(storage_no_prefix.get_key("file.txt"), "file.txt");
+        assert_eq!(format_key("backups", "file.txt"), "backups/file.txt");
+        assert_eq!(
+            format_key("backups/", "dir/file.txt"),
+            "backups/dir/file.txt"
+        );
+        assert_eq!(format_key("", "file.txt"), "file.txt");
+        assert_eq!(
+            format_key("nested/prefix", "/leading/slash.txt"),
+            "nested/prefix/leading/slash.txt"
+        );
     }
 }

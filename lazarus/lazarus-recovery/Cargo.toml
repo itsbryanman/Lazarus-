@@ -7,4 +7,7 @@ edition = "2024"
 ratatui = "0.28"
 crossterm = "0.28"
 lazarus-core = { path = "../lazarus-core" }
+lazarus-cli = { path = "../lazarus-cli" }
 tokio = { version = "1.48.0", features = ["full"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sysinfo = "0.30"

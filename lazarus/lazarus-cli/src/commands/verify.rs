@@ -1,9 +1,10 @@
 use clap::Args;
-use lazarus_core::config::ConfigManager;
 use lazarus_core::catalog::index::CatalogIndex;
+use lazarus_core::compression::adaptive;
+use lazarus_core::config::ConfigManager;
+use lazarus_core::error::Result;
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
-use lazarus_core::error::Result;
 use std::path::Path;
 
 #[derive(Args)]
@@ -72,7 +73,7 @@ pub async fn verify(args: &VerifyArgs) -> Result<()> {
         let ciphertext = &encrypted_data[12..];
 
         // Decrypt the chunk
-        let compressed_data = match key_manager.decrypt_data(ciphertext, nonce) {
+        let encoded_data = match key_manager.decrypt_data(ciphertext, nonce) {
             Ok(data) => data,
             Err(e) => {
                 println!("\n  ERROR: Failed to decrypt chunk {}: {}", hash, e);
@@ -81,8 +82,8 @@ pub async fn verify(args: &VerifyArgs) -> Result<()> {
             }
         };
 
-        // Decompress the data
-        let data = match zstd::decode_all(&compressed_data[..]) {
+        // Decode the data (adaptive compression aware)
+        let data = match adaptive::decode_chunk(&encoded_data) {
             Ok(data) => data,
             Err(e) => {
                 println!("\n  ERROR: Failed to decompress chunk {}: {}", hash, e);
@@ -116,7 +117,7 @@ pub async fn verify(args: &VerifyArgs) -> Result<()> {
     if missing_chunks > 0 || corrupted_chunks > 0 {
         println!("\n❌ Repository has integrity issues!");
         return Err(lazarus_core::error::LazarusError::VerificationFailed(
-            format!("{} missing, {} corrupted", missing_chunks, corrupted_chunks)
+            format!("{} missing, {} corrupted", missing_chunks, corrupted_chunks),
         ));
     } else {
         println!("\n✓ Repository integrity verified successfully!");

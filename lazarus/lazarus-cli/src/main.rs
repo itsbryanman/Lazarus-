@@ -1,8 +1,5 @@
 use clap::{Parser, Subcommand};
-
-pub mod commands;
-pub mod interactive;
-pub mod output;
+use lazarus_cli::commands;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -25,6 +22,12 @@ enum Commands {
     Verify(commands::verify::VerifyArgs),
     /// Configure Lazarus
     Config(commands::config::ConfigArgs),
+    /// Manage immutable retention policies
+    Retention(commands::retention::RetentionArgs),
+    /// Remove unreferenced data using a retention policy
+    Prune(commands::prune::PruneArgs),
+    /// Recovery utilities (ISO builder, etc.)
+    Recover(commands::recover::RecoverArgs),
 }
 
 #[tokio::main]
@@ -38,6 +41,9 @@ async fn main() {
         Commands::List(args) => commands::list::list(args).await,
         Commands::Verify(args) => commands::verify::verify(args).await,
         Commands::Config(args) => commands::config::config(args).await,
+        Commands::Retention(args) => commands::retention::retention(args).await,
+        Commands::Prune(args) => commands::prune::prune(args).await,
+        Commands::Recover(args) => commands::recover::recover(args).await,
     };
 
     if let Err(e) = result {

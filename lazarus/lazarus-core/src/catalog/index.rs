@@ -1,7 +1,7 @@
-use crate::error::{Result, LazarusError};
+use crate::error::{LazarusError, Result};
 use rusqlite::{Connection, params};
-use std::path::Path;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Type of object in the catalog
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,10 @@ pub struct ObjectMetadata {
     pub mode: u32,
     pub size: u64,
     pub modified: u64,
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: u32,
 }
 
 /// Catalog database for managing backups
@@ -27,8 +31,8 @@ pub struct CatalogIndex {
 impl CatalogIndex {
     /// Create a new catalog or open an existing one
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let conn = Connection::open(db_path)
-            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let conn =
+            Connection::open(db_path).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let catalog = Self { conn };
         catalog.init_schema()?;
@@ -37,8 +41,9 @@ impl CatalogIndex {
 
     /// Initialize the database schema
     fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
+        self.conn
+            .execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS Chunks (
                 hash TEXT PRIMARY KEY,
                 stored_size INTEGER NOT NULL,
@@ -81,14 +86,20 @@ impl CatalogIndex {
             CREATE INDEX IF NOT EXISTS idx_filechunks_file ON FileChunks(file_object_id);
             CREATE INDEX IF NOT EXISTS idx_tree_parent ON Tree(parent_object_id);
             CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON Snapshots(timestamp);
-            "#
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+            "#,
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         Ok(())
     }
 
     /// Insert or get a chunk by hash
-    pub fn upsert_chunk(&self, hash: &str, stored_size: usize, uncompressed_size: usize) -> Result<()> {
+    pub fn upsert_chunk(
+        &self,
+        hash: &str,
+        stored_size: usize,
+        uncompressed_size: usize,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO Chunks (hash, stored_size, uncompressed_size) VALUES (?1, ?2, ?3)",
             params![hash, stored_size as i64, uncompressed_size as i64],
@@ -98,26 +109,36 @@ impl CatalogIndex {
 
     /// Check if a chunk exists
     pub fn chunk_exists(&self, hash: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM Chunks WHERE hash = ?1",
-            params![hash],
-            |row| row.get(0)
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM Chunks WHERE hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         Ok(count > 0)
     }
 
     /// Create a new object (file or directory)
     pub fn create_object(&self, obj_type: ObjectType, encrypted_metadata: &[u8]) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO Objects (type, metadata) VALUES (?1, ?2)",
-            params![obj_type as i32, encrypted_metadata],
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        self.conn
+            .execute(
+                "INSERT INTO Objects (type, metadata) VALUES (?1, ?2)",
+                params![obj_type as i32, encrypted_metadata],
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         Ok(self.conn.last_insert_rowid())
     }
 
     /// Add a tree entry (link parent directory to child)
-    pub fn add_tree_entry(&self, parent_id: i64, child_id: i64, encrypted_name: &[u8]) -> Result<()> {
+    pub fn add_tree_entry(
+        &self,
+        parent_id: i64,
+        child_id: i64,
+        encrypted_name: &[u8],
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO Tree (parent_object_id, child_object_id, encrypted_name) VALUES (?1, ?2, ?3)",
             params![parent_id, child_id, encrypted_name],
@@ -135,7 +156,13 @@ impl CatalogIndex {
     }
 
     /// Create a new snapshot
-    pub fn create_snapshot(&self, snapshot_id: &str, timestamp: u64, root_object_id: i64, encrypted_metadata: &[u8]) -> Result<()> {
+    pub fn create_snapshot(
+        &self,
+        snapshot_id: &str,
+        timestamp: u64,
+        root_object_id: i64,
+        encrypted_metadata: &[u8],
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO Snapshots (snapshot_id, timestamp, root_object_id, metadata) VALUES (?1, ?2, ?3, ?4)",
             params![snapshot_id, timestamp as i64, root_object_id, encrypted_metadata],
@@ -145,16 +172,16 @@ impl CatalogIndex {
 
     /// List all snapshots
     pub fn list_snapshots(&self) -> Result<Vec<(String, u64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT snapshot_id, timestamp FROM Snapshots ORDER BY timestamp DESC"
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT snapshot_id, timestamp FROM Snapshots ORDER BY timestamp DESC")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        let snapshots = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as u64,
-            ))
-        }).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let snapshots = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let mut result = Vec::new();
         for snapshot in snapshots {
@@ -169,7 +196,7 @@ impl CatalogIndex {
         let result = self.conn.query_row(
             "SELECT root_object_id, metadata FROM Snapshots WHERE snapshot_id = ?1",
             params![snapshot_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         );
 
         match result {
@@ -191,7 +218,7 @@ impl CatalogIndex {
                     _ => ObjectType::File, // Default
                 };
                 Ok((obj_type, row.get::<_, Vec<u8>>(1)?))
-            }
+            },
         );
 
         match result {
@@ -203,16 +230,16 @@ impl CatalogIndex {
 
     /// Get children of a directory object
     pub fn get_tree_children(&self, parent_id: i64) -> Result<Vec<(i64, Vec<u8>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT child_object_id, encrypted_name FROM Tree WHERE parent_object_id = ?1"
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT child_object_id, encrypted_name FROM Tree WHERE parent_object_id = ?1")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        let children = stmt.query_map(params![parent_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-            ))
-        }).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let children = stmt
+            .query_map(params![parent_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let mut result = Vec::new();
         for child in children {
@@ -224,13 +251,16 @@ impl CatalogIndex {
 
     /// Get file chunks in order
     pub fn get_file_chunks(&self, file_id: i64) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT chunk_hash FROM FileChunks WHERE file_object_id = ?1 ORDER BY chunk_order"
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT chunk_hash FROM FileChunks WHERE file_object_id = ?1 ORDER BY chunk_order",
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        let chunks = stmt.query_map(params![file_id], |row| {
-            row.get::<_, String>(0)
-        }).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let chunks = stmt
+            .query_map(params![file_id], |row| row.get::<_, String>(0))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let mut result = Vec::new();
         for chunk in chunks {
@@ -242,32 +272,36 @@ impl CatalogIndex {
 
     /// Get total storage statistics
     pub fn get_stats(&self) -> Result<(usize, usize, usize)> {
-        let chunk_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM Chunks",
-            [],
-            |row| row.get(0)
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let chunk_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM Chunks", [], |row| row.get(0))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        let object_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM Objects",
-            [],
-            |row| row.get(0)
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let object_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM Objects", [], |row| row.get(0))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        let snapshot_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM Snapshots",
-            [],
-            |row| row.get(0)
-        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let snapshot_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM Snapshots", [], |row| row.get(0))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        Ok((chunk_count as usize, object_count as usize, snapshot_count as usize))
+        Ok((
+            chunk_count as usize,
+            object_count as usize,
+            snapshot_count as usize,
+        ))
     }
 
     /// List all chunk hashes in the catalog
     pub fn list_all_chunk_hashes(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT hash FROM Chunks")
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash FROM Chunks")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        let chunks = stmt.query_map([], |row| row.get(0))
+        let chunks = stmt
+            .query_map([], |row| row.get(0))
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let mut result = Vec::new();
@@ -275,6 +309,25 @@ impl CatalogIndex {
             result.push(chunk.map_err(|e| LazarusError::DatabaseError(e.to_string()))?);
         }
         Ok(result)
+    }
+
+    /// Remove all file chunk references to a specific chunk hash
+    pub fn delete_file_chunks_by_hash(&self, hash: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM FileChunks WHERE chunk_hash = ?1",
+                params![hash],
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Remove a chunk record from the catalog
+    pub fn delete_chunk(&self, hash: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM Chunks WHERE hash = ?1", params![hash])
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -318,7 +371,9 @@ mod tests {
         assert!(file_id > 0);
 
         // Create a directory object
-        let dir_id = catalog.create_object(ObjectType::Directory, metadata).unwrap();
+        let dir_id = catalog
+            .create_object(ObjectType::Directory, metadata)
+            .unwrap();
         assert!(dir_id > 0);
         assert_ne!(file_id, dir_id);
 
@@ -340,12 +395,16 @@ mod tests {
         let catalog = create_test_catalog();
 
         // Create parent and child objects
-        let parent_id = catalog.create_object(ObjectType::Directory, b"parent").unwrap();
+        let parent_id = catalog
+            .create_object(ObjectType::Directory, b"parent")
+            .unwrap();
         let child_id = catalog.create_object(ObjectType::File, b"child").unwrap();
 
         // Add tree entry
         let encrypted_name = b"encrypted_filename";
-        catalog.add_tree_entry(parent_id, child_id, encrypted_name).unwrap();
+        catalog
+            .add_tree_entry(parent_id, child_id, encrypted_name)
+            .unwrap();
 
         // Get children
         let children = catalog.get_tree_children(parent_id).unwrap();
@@ -384,13 +443,17 @@ mod tests {
         let catalog = create_test_catalog();
 
         // Create root object
-        let root_id = catalog.create_object(ObjectType::Directory, b"root").unwrap();
+        let root_id = catalog
+            .create_object(ObjectType::Directory, b"root")
+            .unwrap();
 
         // Create snapshot
         let snapshot_id = "snapshot-123";
         let timestamp = 1234567890u64;
         let metadata = b"snapshot metadata";
-        catalog.create_snapshot(snapshot_id, timestamp, root_id, metadata).unwrap();
+        catalog
+            .create_snapshot(snapshot_id, timestamp, root_id, metadata)
+            .unwrap();
 
         // List snapshots
         let snapshots = catalog.list_snapshots().unwrap();
@@ -399,7 +462,8 @@ mod tests {
         assert_eq!(snapshots[0].1, timestamp);
 
         // Get snapshot details
-        let (retrieved_root_id, retrieved_metadata) = catalog.get_snapshot(snapshot_id).unwrap().unwrap();
+        let (retrieved_root_id, retrieved_metadata) =
+            catalog.get_snapshot(snapshot_id).unwrap().unwrap();
         assert_eq!(retrieved_root_id, root_id);
         assert_eq!(retrieved_metadata, metadata);
 
@@ -421,7 +485,9 @@ mod tests {
         catalog.upsert_chunk("chunk1", 100, 200).unwrap();
         catalog.upsert_chunk("chunk2", 150, 250).unwrap();
         let obj_id = catalog.create_object(ObjectType::File, b"file").unwrap();
-        catalog.create_snapshot("snap1", 123, obj_id, b"meta").unwrap();
+        catalog
+            .create_snapshot("snap1", 123, obj_id, b"meta")
+            .unwrap();
 
         // Check stats
         let (chunks, objects, snapshots) = catalog.get_stats().unwrap();
@@ -452,11 +518,19 @@ mod tests {
         let catalog = create_test_catalog();
 
         // Create multiple snapshots with different timestamps
-        let root_id = catalog.create_object(ObjectType::Directory, b"root").unwrap();
+        let root_id = catalog
+            .create_object(ObjectType::Directory, b"root")
+            .unwrap();
 
-        catalog.create_snapshot("snap1", 1000, root_id, b"meta1").unwrap();
-        catalog.create_snapshot("snap2", 3000, root_id, b"meta2").unwrap();
-        catalog.create_snapshot("snap3", 2000, root_id, b"meta3").unwrap();
+        catalog
+            .create_snapshot("snap1", 1000, root_id, b"meta1")
+            .unwrap();
+        catalog
+            .create_snapshot("snap2", 3000, root_id, b"meta2")
+            .unwrap();
+        catalog
+            .create_snapshot("snap3", 2000, root_id, b"meta3")
+            .unwrap();
 
         // List should be ordered by timestamp (descending)
         let snapshots = catalog.list_snapshots().unwrap();

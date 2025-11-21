@@ -1,9 +1,11 @@
+#![allow(deprecated)]
+
+use crate::error::{LazarusError, Result};
 use aes_gcm::aead::generic_array::GenericArray;
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{PasswordHash, SaltString};
+use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
+use argon2::{Argon2, PasswordHasher};
 use serde::{Deserialize, Serialize};
-use crate::error::{Result, LazarusError};
 
 /// Configuration stored in the repository
 #[derive(Serialize, Deserialize, Clone)]
@@ -47,8 +49,8 @@ impl KeyManager {
         rng.fill_bytes(&mut metadata_key);
 
         // Encrypt the keys with the master key
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&master_key));
 
@@ -60,10 +62,15 @@ impl KeyManager {
 
         let encrypted_repo_key = cipher
             .encrypt(GenericArray::from_slice(&repo_key_nonce), &repo_key[..])
-            .map_err(|_| LazarusError::EncryptionError("Failed to encrypt repository key".into()))?;
+            .map_err(|_| {
+                LazarusError::EncryptionError("Failed to encrypt repository key".into())
+            })?;
 
         let encrypted_metadata_key = cipher
-            .encrypt(GenericArray::from_slice(&metadata_key_nonce), &metadata_key[..])
+            .encrypt(
+                GenericArray::from_slice(&metadata_key_nonce),
+                &metadata_key[..],
+            )
             .map_err(|_| LazarusError::EncryptionError("Failed to encrypt metadata key".into()))?;
 
         let config = RepositoryConfig {
@@ -88,22 +95,26 @@ impl KeyManager {
         let master_key = Self::derive_master_key(master_password, &config.salt)?;
 
         // Decrypt the keys
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&master_key));
 
         let repo_key_bytes = cipher
             .decrypt(
                 GenericArray::from_slice(&config.repo_key_nonce),
-                config.encrypted_repo_key.as_ref()
+                config.encrypted_repo_key.as_ref(),
             )
-            .map_err(|_| LazarusError::EncryptionError("Failed to decrypt repository key - wrong password?".into()))?;
+            .map_err(|_| {
+                LazarusError::EncryptionError(
+                    "Failed to decrypt repository key - wrong password?".into(),
+                )
+            })?;
 
         let metadata_key_bytes = cipher
             .decrypt(
                 GenericArray::from_slice(&config.metadata_key_nonce),
-                config.encrypted_metadata_key.as_ref()
+                config.encrypted_metadata_key.as_ref(),
             )
             .map_err(|_| LazarusError::EncryptionError("Failed to decrypt metadata key".into()))?;
 
@@ -133,10 +144,13 @@ impl KeyManager {
         // Hash the password
         let password_hash = argon2
             .hash_password(password.as_bytes(), &salt_string)
-            .map_err(|e| LazarusError::EncryptionError(format!("Failed to hash password: {}", e)))?;
+            .map_err(|e| {
+                LazarusError::EncryptionError(format!("Failed to hash password: {}", e))
+            })?;
 
         // Extract the hash bytes
-        let hash_output = password_hash.hash
+        let hash_output = password_hash
+            .hash
             .ok_or_else(|| LazarusError::EncryptionError("No hash output".into()))?;
         let hash_bytes = hash_output.as_bytes();
 
@@ -162,8 +176,8 @@ impl KeyManager {
 
     /// Encrypt data with the repository key and a unique random nonce
     pub fn encrypt_data(&self, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
         use rand::RngCore;
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.repo_key));
@@ -181,8 +195,8 @@ impl KeyManager {
 
     /// Decrypt data with the repository key
     pub fn decrypt_data(&self, encrypted_data: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.repo_key));
 
@@ -195,8 +209,8 @@ impl KeyManager {
 
     /// Encrypt metadata with the metadata key
     pub fn encrypt_metadata(&self, metadata: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
         use rand::RngCore;
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.metadata_key));
@@ -213,8 +227,8 @@ impl KeyManager {
 
     /// Decrypt metadata with the metadata key
     pub fn decrypt_metadata(&self, encrypted_metadata: &[u8], nonce: &[u8]) -> Result<String> {
-        use aes_gcm::{Aes256Gcm, KeyInit};
         use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.metadata_key));
 
@@ -272,7 +286,8 @@ mod tests {
         let (manager, _config) = KeyManager::init_repository(password).unwrap();
 
         // Test data
-        let original_data = b"This is some test data that should be encrypted and decrypted correctly!";
+        let original_data =
+            b"This is some test data that should be encrypted and decrypted correctly!";
 
         // Encrypt
         let (encrypted, nonce) = manager.encrypt_data(original_data).unwrap();

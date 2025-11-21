@@ -75,17 +75,23 @@ impl AgentManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn get_agent(&self, agent_id: &str) -> Option<Agent> {
         let agents = self.agents.read().await;
         agents.get(agent_id).cloned()
     }
 
+    #[allow(dead_code)]
     pub async fn list_agents(&self) -> Vec<Agent> {
         let agents = self.agents.read().await;
         agents.values().cloned().collect()
     }
 
-    pub async fn update_agent_status(&self, agent_id: &str, status: AgentStatus) -> Result<(), String> {
+    pub async fn update_agent_status(
+        &self,
+        agent_id: &str,
+        status: AgentStatus,
+    ) -> Result<(), String> {
         let mut agents = self.agents.write().await;
 
         if let Some(agent) = agents.get_mut(agent_id) {
@@ -96,6 +102,7 @@ impl AgentManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn check_stale_agents(&self) {
         let mut agents = self.agents.write().await;
         let now = Utc::now();

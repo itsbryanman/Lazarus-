@@ -1,22 +1,24 @@
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Terminal,
 };
+use restore::engine::{self, SnapshotInfo};
 use std::io;
 
 pub mod boot;
-pub mod restore;
 pub mod hardware;
 pub mod partition;
+pub mod restore;
 
 enum AppState {
     StorageSelection,
@@ -30,16 +32,19 @@ struct App {
     selected_storage: usize,
     repository_path: String,
     password: String,
-    snapshots: Vec<String>,
+    snapshots: Vec<SnapshotInfo>,
     selected_snapshot: usize,
     input_mode: InputMode,
     current_input: String,
+    restore_destination: String,
+    status_message: Option<String>,
 }
 
 enum InputMode {
     Normal,
     EditingPath,
     EditingPassword,
+    EditingDestination,
 }
 
 impl Default for App {
@@ -58,6 +63,8 @@ impl Default for App {
             selected_snapshot: 0,
             input_mode: InputMode::Normal,
             current_input: String::new(),
+            restore_destination: "/mnt/lazarus_restore".to_string(),
+            status_message: None,
         }
     }
 }
@@ -151,18 +158,43 @@ fn run_app<B: ratatui::backend::Backend>(
                         }
                         AppState::RepositoryConnection => {
                             if !app.repository_path.is_empty() && !app.password.is_empty() {
-                                // In a real implementation, we would connect here
-                                // For now, just populate some dummy snapshots
-                                app.snapshots = vec![
-                                    "2025-10-28T14:30:00".to_string(),
-                                    "2025-10-27T14:30:00".to_string(),
-                                    "2025-10-26T14:30:00".to_string(),
-                                ];
-                                app.state = AppState::SnapshotList;
+                                match connect_repository(&app.repository_path, &app.password) {
+                                    Ok(snapshots) => {
+                                        app.snapshots = snapshots;
+                                        app.selected_snapshot = 0;
+                                        app.state = AppState::SnapshotList;
+                                        app.status_message = Some(format!(
+                                            "Connected. {} snapshot(s) available",
+                                            app.snapshots.len()
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        app.status_message =
+                                            Some(format!("Connection failed: {}", err));
+                                    }
+                                }
                             }
                         }
                         AppState::SnapshotList => {
-                            // Snapshot selected - would trigger restore
+                            if let Some(snapshot) = app.snapshots.get(app.selected_snapshot) {
+                                match perform_restore(
+                                    &app.repository_path,
+                                    &app.password,
+                                    &snapshot.id,
+                                    &app.restore_destination,
+                                ) {
+                                    Ok(_) => {
+                                        app.status_message = Some(format!(
+                                            "Restored {} to {}",
+                                            snapshot.id, app.restore_destination
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        app.status_message =
+                                            Some(format!("Restore failed: {}", err));
+                                    }
+                                }
+                            }
                         }
                     },
                     KeyCode::Char('p') if matches!(app.state, AppState::RepositoryConnection) => {
@@ -173,6 +205,13 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.input_mode = InputMode::EditingPassword;
                         app.current_input.clear();
                     }
+                    KeyCode::Char('d')
+                        if matches!(app.state, AppState::RepositoryConnection)
+                            || matches!(app.state, AppState::SnapshotList) =>
+                    {
+                        app.input_mode = InputMode::EditingDestination;
+                        app.current_input = app.restore_destination.clone();
+                    }
                     KeyCode::Esc => match app.state {
                         AppState::RepositoryConnection => app.state = AppState::StorageSelection,
                         AppState::SnapshotList => app.state = AppState::RepositoryConnection,
@@ -180,7 +219,9 @@ fn run_app<B: ratatui::backend::Backend>(
                     },
                     _ => {}
                 },
-                InputMode::EditingPath | InputMode::EditingPassword => match key.code {
+                InputMode::EditingPath
+                | InputMode::EditingPassword
+                | InputMode::EditingDestination => match key.code {
                     KeyCode::Enter => {
                         match app.input_mode {
                             InputMode::EditingPath => {
@@ -188,6 +229,9 @@ fn run_app<B: ratatui::backend::Backend>(
                             }
                             InputMode::EditingPassword => {
                                 app.password = app.current_input.clone();
+                            }
+                            InputMode::EditingDestination => {
+                                app.restore_destination = app.current_input.clone();
                             }
                             _ => {}
                         }
@@ -224,7 +268,11 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 
     // Title
     let title = Paragraph::new("Lazarus Bare Metal Recovery")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
@@ -270,7 +318,12 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                     Span::raw("*".repeat(app.password.len())),
                 ]),
                 Line::from(""),
-                Line::from("Press 'p' to edit path, 'w' to edit password, Enter to connect"),
+                Line::from(vec![
+                    Span::styled("Restore Destination: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(&app.restore_destination),
+                ]),
+                Line::from(""),
+                Line::from("Press 'p' (path), 'w' (password), 'd' (destination), Enter to connect"),
             ];
 
             if matches!(app.input_mode, InputMode::EditingPath) {
@@ -301,6 +354,23 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                         .borders(Borders::ALL),
                 );
                 f.render_widget(input, chunks[1]);
+            } else if matches!(app.input_mode, InputMode::EditingDestination) {
+                let text = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            "Enter Restore Destination: ",
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::raw(&app.current_input),
+                    ]),
+                ];
+                let input = Paragraph::new(text).block(
+                    Block::default()
+                        .title("Edit Destination")
+                        .borders(Borders::ALL),
+                );
+                f.render_widget(input, chunks[1]);
             } else {
                 let para = Paragraph::new(text).block(
                     Block::default()
@@ -323,7 +393,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                     } else {
                         Style::default()
                     };
-                    ListItem::new(snapshot.as_str()).style(style)
+                    ListItem::new(format_snapshot(snapshot)).style(style)
                 })
                 .collect();
 
@@ -340,8 +410,44 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     }
 
     // Help
-    let help = Paragraph::new("↑/↓: Navigate | Enter: Select | Esc: Back | q: Quit")
+    let mut help_lines = Vec::new();
+    if let Some(message) = &app.status_message {
+        help_lines.push(Line::from(message.as_str()));
+    }
+    help_lines.push(Line::from(
+        "↑/↓: Navigate | Enter: Select | Esc: Back | q: Quit",
+    ));
+    let help = Paragraph::new(help_lines)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[2]);
+}
+
+fn connect_repository(path: &str, password: &str) -> Result<Vec<SnapshotInfo>, String> {
+    if path.is_empty() {
+        return Err("Repository path is empty".to_string());
+    }
+    if password.is_empty() {
+        return Err("Password is empty".to_string());
+    }
+    engine::list_snapshots(path, password)
+}
+
+fn perform_restore(
+    path: &str,
+    password: &str,
+    snapshot_id: &str,
+    destination: &str,
+) -> Result<(), String> {
+    if destination.is_empty() {
+        return Err("Destination path is empty".to_string());
+    }
+    engine::restore_snapshot(path, password, snapshot_id, destination)
+}
+
+fn format_snapshot(snapshot: &SnapshotInfo) -> String {
+    let datetime = DateTime::<Utc>::from_timestamp(snapshot.timestamp as i64, 0)
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{} — {}", datetime, snapshot.id)
 }

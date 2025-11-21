@@ -1,10 +1,14 @@
 use clap::Args;
-use lazarus_core::storage::backend::StorageBackend;
-use lazarus_core::storage::local::LocalStorage;
-use lazarus_core::error::Result;
+use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
 use lazarus_core::chunking::fixed_size::FixedSizeChunker;
+use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
-use lazarus_core::catalog::index::{CatalogIndex, ObjectType, ObjectMetadata};
+use lazarus_core::error::{LazarusError, Result};
+use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
+use lazarus_core::storage::backend::{RetentionLock, StorageBackend};
+use lazarus_core::storage::local::LocalStorage;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -35,8 +39,43 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     // Initialize storage backend
     let storage = LocalStorage::new(config_mgr.data_path());
 
+    let retention_policy = config_mgr.load_retention_policy().await?;
+    let retention_lock = retention_policy.as_lock();
+    if retention_lock.is_some() {
+        println!(
+            "Immutable retention policy active (mode: {:?}, minimum {} days)",
+            retention_policy.mode, retention_policy.min_retention_days
+        );
+    }
+
     // Get source path
     let source_path = Path::new(&args.source);
+
+    let detection_engine = DetectionEngine::new(config_mgr.repo_path());
+    let detection_report = detection_engine
+        .analyze_paths(&[source_path.to_path_buf()])
+        .await?;
+
+    match detection_report.verdict {
+        DetectionVerdict::Clean => {
+            println!(
+                "Ransomware pre-check passed. Trust score: {:.0}%",
+                detection_report.trust.score * 100.0
+            );
+            if let Some(rec) = detection_report.trust.recommendation {
+                println!("  Advisory: {}", rec);
+            }
+        }
+        DetectionVerdict::Suspicious => {
+            println!("⚠️  Suspicious activity detected prior to backup!");
+            for anomaly in &detection_report.anomalies {
+                println!("  - {:?}", anomaly);
+            }
+            return Err(LazarusError::VerificationFailed(
+                "Backup aborted due to ransomware indicators".into(),
+            ));
+        }
+    }
 
     // Create snapshot ID (timestamp-based)
     let snapshot_id = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -46,13 +85,14 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
         .as_secs();
 
     // Backup the source (file or directory)
+    let lock_ref = retention_lock.as_ref();
     let root_object_id = if source_path.is_file() {
-        backup_file(&key_manager, &catalog, &storage, source_path).await?
+        backup_file(&key_manager, &catalog, &storage, source_path, lock_ref).await?
     } else if source_path.is_dir() {
-        backup_directory(&key_manager, &catalog, &storage, source_path).await?
+        backup_directory(&key_manager, &catalog, &storage, source_path, lock_ref).await?
     } else {
         return Err(lazarus_core::error::LazarusError::Storage(
-            "Source is neither a file nor a directory".to_string()
+            "Source is neither a file nor a directory".to_string(),
         ));
     };
 
@@ -64,11 +104,16 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
             .to_string_lossy()
             .to_string(),
     });
-    let (encrypted_snapshot_metadata, _) = key_manager
-        .encrypt_metadata(&snapshot_metadata.to_string())?;
+    let (encrypted_snapshot_metadata, _) =
+        key_manager.encrypt_metadata(&snapshot_metadata.to_string())?;
 
     // Save snapshot to catalog
-    catalog.create_snapshot(&snapshot_id, timestamp, root_object_id, &encrypted_snapshot_metadata)?;
+    catalog.create_snapshot(
+        &snapshot_id,
+        timestamp,
+        root_object_id,
+        &encrypted_snapshot_metadata,
+    )?;
 
     println!("✓ Backup completed successfully!");
     println!("  Snapshot ID: {}", snapshot_id);
@@ -87,6 +132,7 @@ async fn backup_file(
     catalog: &CatalogIndex,
     storage: &LocalStorage,
     file_path: &Path,
+    retention: Option<&RetentionLock>,
 ) -> Result<i64> {
     println!("Backing up file: {}", file_path.display());
 
@@ -95,27 +141,21 @@ async fn backup_file(
 
     // Get file metadata
     let metadata = tokio::fs::metadata(file_path).await?;
-    let file_metadata = ObjectMetadata {
-        name: file_path.file_name()
+    let file_metadata = build_object_metadata(
+        file_path
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string(),
-        mode: 0o644, // Default permissions
-        size: metadata.len(),
-        modified: metadata.modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
+        &metadata,
+        false,
+    );
 
-    // Encrypt metadata
-    let metadata_json = serde_json::to_string(&file_metadata)
-        .map_err(|e| lazarus_core::error::LazarusError::SerializationError(e.to_string()))?;
-    let (encrypted_metadata, _) = key_manager.encrypt_metadata(&metadata_json)?;
+    // Encrypt metadata (nonce prepended)
+    let metadata_blob = serialize_and_encrypt_metadata(key_manager, &file_metadata)?;
 
     // Create object for file
-    let file_object_id = catalog.create_object(ObjectType::File, &encrypted_metadata)?;
+    let file_object_id = catalog.create_object(ObjectType::File, &metadata_blob)?;
 
     // Chunk the file
     let chunker = FixedSizeChunker::new(&data, CHUNK_SIZE);
@@ -128,11 +168,11 @@ async fn backup_file(
 
         // Check if chunk already exists (deduplication)
         if !catalog.chunk_exists(&hash_hex)? {
-            // Compress the chunk
-            let compressed_chunk = zstd::encode_all(chunk, 3)?;
+            // Encode chunk with adaptive compression + header
+            let encoded_chunk = adaptive::encode_chunk(chunk)?;
 
             // Encrypt with unique nonce
-            let (encrypted_chunk, nonce) = key_manager.encrypt_data(&compressed_chunk)?;
+            let (encrypted_chunk, nonce) = key_manager.encrypt_data(&encoded_chunk)?;
 
             // Store chunk with nonce prepended (first 12 bytes are nonce)
             let mut stored_data = nonce;
@@ -140,7 +180,13 @@ async fn backup_file(
 
             // Store to backend using hash-based sharding
             let shard_dir = &hash_hex[..2];
-            storage.put(&format!("{}/{}", shard_dir, hash_hex), &stored_data).await?;
+            storage
+                .write_once(
+                    &format!("{}/{}", shard_dir, hash_hex),
+                    &stored_data,
+                    retention,
+                )
+                .await?;
 
             // Record in catalog
             catalog.upsert_chunk(&hash_hex, stored_data.len(), chunk.len())?;
@@ -161,30 +207,25 @@ async fn backup_directory(
     catalog: &CatalogIndex,
     storage: &LocalStorage,
     dir_path: &Path,
+    retention: Option<&RetentionLock>,
 ) -> Result<i64> {
     println!("Backing up directory: {}", dir_path.display());
 
     // Create object for directory
     let metadata = tokio::fs::metadata(dir_path).await?;
-    let dir_metadata = ObjectMetadata {
-        name: dir_path.file_name()
+    let dir_metadata = build_object_metadata(
+        dir_path
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string(),
-        mode: 0o755, // Default directory permissions
-        size: 0,
-        modified: metadata.modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
+        &metadata,
+        true,
+    );
 
-    let metadata_json = serde_json::to_string(&dir_metadata)
-        .map_err(|e| lazarus_core::error::LazarusError::SerializationError(e.to_string()))?;
-    let (encrypted_metadata, _) = key_manager.encrypt_metadata(&metadata_json)?;
+    let metadata_blob = serialize_and_encrypt_metadata(key_manager, &dir_metadata)?;
 
-    let dir_object_id = catalog.create_object(ObjectType::Directory, &encrypted_metadata)?;
+    let dir_object_id = catalog.create_object(ObjectType::Directory, &metadata_blob)?;
 
     // Walk directory entries
     let mut entries = tokio::fs::read_dir(dir_path).await?;
@@ -195,9 +236,16 @@ async fn backup_directory(
 
         // Recursively backup child
         let child_object_id = if entry_path.is_file() {
-            backup_file(key_manager, catalog, storage, &entry_path).await?
+            backup_file(key_manager, catalog, storage, &entry_path, retention).await?
         } else if entry_path.is_dir() {
-            Box::pin(backup_directory(key_manager, catalog, storage, &entry_path)).await?
+            Box::pin(backup_directory(
+                key_manager,
+                catalog,
+                storage,
+                &entry_path,
+                retention,
+            ))
+            .await?
         } else {
             continue; // Skip symlinks and other special files
         };
@@ -216,4 +264,48 @@ async fn backup_directory(
     println!("  ✓ {}/", dir_path.display());
 
     Ok(dir_object_id)
+}
+
+fn build_object_metadata(
+    name: String,
+    metadata: &std::fs::Metadata,
+    is_dir: bool,
+) -> ObjectMetadata {
+    let (uid, gid, mode) = capture_platform_metadata(metadata, is_dir);
+    ObjectMetadata {
+        name,
+        mode,
+        size: if is_dir { 0 } else { metadata.len() },
+        modified: system_time_to_unix(metadata.modified().unwrap_or_else(|_| SystemTime::now())),
+        uid,
+        gid,
+    }
+}
+
+fn serialize_and_encrypt_metadata(
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    metadata: &ObjectMetadata,
+) -> Result<Vec<u8>> {
+    let metadata_json = serde_json::to_string(metadata)
+        .map_err(|e| LazarusError::SerializationError(e.to_string()))?;
+    let (encrypted_metadata, nonce) = key_manager.encrypt_metadata(&metadata_json)?;
+    let mut stored_metadata = nonce;
+    stored_metadata.extend_from_slice(&encrypted_metadata);
+    Ok(stored_metadata)
+}
+
+fn system_time_to_unix(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        .as_secs()
+}
+
+#[cfg(unix)]
+fn capture_platform_metadata(metadata: &std::fs::Metadata, _is_dir: bool) -> (u32, u32, u32) {
+    (metadata.uid(), metadata.gid(), metadata.mode())
+}
+
+#[cfg(not(unix))]
+fn capture_platform_metadata(_metadata: &std::fs::Metadata, is_dir: bool) -> (u32, u32, u32) {
+    (0, 0, if is_dir { 0o755 } else { 0o644 })
 }

@@ -1,10 +1,10 @@
-use crate::error::{Result, LazarusError};
+use crate::error::{LazarusError, Result};
 use crate::storage::backend::StorageBackend;
 use async_trait::async_trait;
 use ssh2::Session;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// SSH/SFTP storage backend
@@ -70,8 +70,9 @@ impl SshStorage {
 
     /// Establish SSH connection
     fn connect(&self) -> Result<()> {
-        let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port))
-            .map_err(|e| LazarusError::Storage(format!("Failed to connect to SSH server: {}", e)))?;
+        let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port)).map_err(|e| {
+            LazarusError::Storage(format!("Failed to connect to SSH server: {}", e))
+        })?;
 
         let mut sess = Session::new()
             .map_err(|e| LazarusError::Storage(format!("Failed to create SSH session: {}", e)))?;
@@ -83,10 +84,14 @@ impl SshStorage {
         // Authenticate
         if let Some(ref key_path) = self.key_path {
             sess.userauth_pubkey_file(&self.username, None, key_path, None)
-                .map_err(|e| LazarusError::Storage(format!("SSH key authentication failed: {}", e)))?;
+                .map_err(|e| {
+                    LazarusError::Storage(format!("SSH key authentication failed: {}", e))
+                })?;
         } else if let Some(ref password) = self.password {
             sess.userauth_password(&self.username, password)
-                .map_err(|e| LazarusError::Storage(format!("SSH password authentication failed: {}", e)))?;
+                .map_err(|e| {
+                    LazarusError::Storage(format!("SSH password authentication failed: {}", e))
+                })?;
         } else {
             return Err(LazarusError::Storage(
                 "No authentication method provided".to_string(),
@@ -94,7 +99,9 @@ impl SshStorage {
         }
 
         if !sess.authenticated() {
-            return Err(LazarusError::Storage("SSH authentication failed".to_string()));
+            return Err(LazarusError::Storage(
+                "SSH authentication failed".to_string(),
+            ));
         }
 
         // Store session
@@ -220,6 +227,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires network access to a test SSH server"]
     async fn test_ssh_storage_creation() {
         // This test requires a real SSH server, so we just test the structure
         // In a real environment, you'd use a test SSH server or mock

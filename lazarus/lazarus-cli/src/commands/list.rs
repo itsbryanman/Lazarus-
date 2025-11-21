@@ -1,6 +1,6 @@
 use clap::Args;
-use lazarus_core::config::ConfigManager;
 use lazarus_core::catalog::index::CatalogIndex;
+use lazarus_core::config::ConfigManager;
 use lazarus_core::error::Result;
 
 #[derive(Args)]

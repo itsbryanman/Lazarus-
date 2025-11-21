@@ -1,2 +1,2 @@
-pub mod zstd;
 pub mod adaptive;
+pub mod zstd;
