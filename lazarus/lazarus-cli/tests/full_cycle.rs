@@ -38,6 +38,7 @@ async fn full_cycle_backup_and_restore_matches_hashes() {
         source: source_path.to_string_lossy().to_string(),
         repository: repo_path.to_string_lossy().to_string(),
         password: PASSWORD.to_string(),
+        force: false,
     };
     backup(&backup_args).await.expect("backup succeeds");
 
@@ -52,8 +53,8 @@ async fn full_cycle_backup_and_restore_matches_hashes() {
     let latest_snapshot = &snapshots[0].0;
 
     let restore_args = RestoreArgs {
-        snapshot: latest_snapshot.clone(),
-        destination: restore_path.to_string_lossy().to_string(),
+        snapshot: Some(latest_snapshot.clone()),
+        destination: Some(restore_path.to_string_lossy().to_string()),
         repository: repo_path.to_string_lossy().to_string(),
         password: PASSWORD.to_string(),
     };

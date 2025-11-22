@@ -20,6 +20,10 @@ toml = "0.8"
 dirs = "5.0"
 libc = "0.2"
 which = "5.0"
+filetime = "0.2"
+dialoguer = "0.11"
+indicatif = "0.17"
+comfy-table = "7"
 
 [dev-dependencies]
 tempfile = "3"

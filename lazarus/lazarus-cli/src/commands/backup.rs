@@ -1,4 +1,6 @@
-use clap::Args;
+use super::snapshot_utils::encrypt_snapshot_metadata;
+use clap::{ArgAction, Args};
+use indicatif::{ProgressBar, ProgressStyle};
 use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
 use lazarus_core::chunking::fixed_size::FixedSizeChunker;
 use lazarus_core::compression::adaptive;
@@ -9,8 +11,7 @@ use lazarus_core::storage::backend::{RetentionLock, StorageBackend};
 use lazarus_core::storage::local::LocalStorage;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
-use std::time::SystemTime;
+use std::{fs, path::Path, time::SystemTime};
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
@@ -24,6 +25,13 @@ pub struct BackupArgs {
 
     #[arg(short, long, help = "Master password for encryption")]
     pub password: String,
+
+    #[arg(
+        long,
+        help = "Ignore ransomware detection warnings and proceed anyway",
+        action = ArgAction::SetTrue
+    )]
+    pub force: bool,
 }
 
 pub async fn backup(args: &BackupArgs) -> Result<()> {
@@ -71,11 +79,19 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
             for anomaly in &detection_report.anomalies {
                 println!("  - {:?}", anomaly);
             }
-            return Err(LazarusError::VerificationFailed(
-                "Backup aborted due to ransomware indicators".into(),
-            ));
+            if args.force {
+                println!("Proceeding with backup due to --force override. Expect potential risk.");
+            } else {
+                return Err(LazarusError::VerificationFailed(
+                    "Backup aborted due to ransomware indicators".into(),
+                ));
+            }
         }
     }
+
+    let total_bytes = estimate_total_bytes(source_path)?;
+    let progress = create_progress_bar(total_bytes, "Backing up");
+    progress.println(format!("Source: {}", source_path.display()));
 
     // Create snapshot ID (timestamp-based)
     let snapshot_id = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -87,9 +103,25 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     // Backup the source (file or directory)
     let lock_ref = retention_lock.as_ref();
     let root_object_id = if source_path.is_file() {
-        backup_file(&key_manager, &catalog, &storage, source_path, lock_ref).await?
+        backup_file(
+            &key_manager,
+            &catalog,
+            &storage,
+            source_path,
+            lock_ref,
+            &progress,
+        )
+        .await?
     } else if source_path.is_dir() {
-        backup_directory(&key_manager, &catalog, &storage, source_path, lock_ref).await?
+        backup_directory(
+            &key_manager,
+            &catalog,
+            &storage,
+            source_path,
+            lock_ref,
+            &progress,
+        )
+        .await?
     } else {
         return Err(lazarus_core::error::LazarusError::Storage(
             "Source is neither a file nor a directory".to_string(),
@@ -104,17 +136,18 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
             .to_string_lossy()
             .to_string(),
     });
-    let (encrypted_snapshot_metadata, _) =
-        key_manager.encrypt_metadata(&snapshot_metadata.to_string())?;
+    let snapshot_metadata_blob =
+        encrypt_snapshot_metadata(&key_manager, &snapshot_metadata.to_string())?;
 
     // Save snapshot to catalog
     catalog.create_snapshot(
         &snapshot_id,
         timestamp,
         root_object_id,
-        &encrypted_snapshot_metadata,
+        &snapshot_metadata_blob,
     )?;
 
+    progress.finish_with_message("Backup completed successfully");
     println!("✓ Backup completed successfully!");
     println!("  Snapshot ID: {}", snapshot_id);
 
@@ -133,8 +166,10 @@ async fn backup_file(
     storage: &LocalStorage,
     file_path: &Path,
     retention: Option<&RetentionLock>,
+    progress: &ProgressBar,
 ) -> Result<i64> {
-    println!("Backing up file: {}", file_path.display());
+    progress.set_message(format!("Backing up {}", file_path.display()));
+    progress.println(format!("Backing up file: {}", file_path.display()));
 
     // Read file data
     let data = tokio::fs::read(file_path).await?;
@@ -197,7 +232,12 @@ async fn backup_file(
         chunk_order += 1;
     }
 
-    println!("  ✓ {} ({} chunks)", file_path.display(), chunk_order);
+    progress.inc(file_metadata.size);
+    progress.println(format!(
+        "  ✓ {} ({} chunks)",
+        file_path.display(),
+        chunk_order
+    ));
 
     Ok(file_object_id)
 }
@@ -208,8 +248,10 @@ async fn backup_directory(
     storage: &LocalStorage,
     dir_path: &Path,
     retention: Option<&RetentionLock>,
+    progress: &ProgressBar,
 ) -> Result<i64> {
-    println!("Backing up directory: {}", dir_path.display());
+    progress.set_message(format!("Scanning {}", dir_path.display()));
+    progress.println(format!("Backing up directory: {}", dir_path.display()));
 
     // Create object for directory
     let metadata = tokio::fs::metadata(dir_path).await?;
@@ -236,7 +278,15 @@ async fn backup_directory(
 
         // Recursively backup child
         let child_object_id = if entry_path.is_file() {
-            backup_file(key_manager, catalog, storage, &entry_path, retention).await?
+            backup_file(
+                key_manager,
+                catalog,
+                storage,
+                &entry_path,
+                retention,
+                progress,
+            )
+            .await?
         } else if entry_path.is_dir() {
             Box::pin(backup_directory(
                 key_manager,
@@ -244,6 +294,7 @@ async fn backup_directory(
                 storage,
                 &entry_path,
                 retention,
+                progress,
             ))
             .await?
         } else {
@@ -261,7 +312,7 @@ async fn backup_directory(
         catalog.add_tree_entry(dir_object_id, child_object_id, &stored_name)?;
     }
 
-    println!("  ✓ {}/", dir_path.display());
+    progress.println(format!("  ✓ {}/", dir_path.display()));
 
     Ok(dir_object_id)
 }
@@ -276,7 +327,7 @@ fn build_object_metadata(
         name,
         mode,
         size: if is_dir { 0 } else { metadata.len() },
-        modified: system_time_to_unix(metadata.modified().unwrap_or_else(|_| SystemTime::now())),
+        mtime: system_time_to_unix(metadata.modified().unwrap_or_else(|_| SystemTime::now())),
         uid,
         gid,
     }
@@ -308,4 +359,32 @@ fn capture_platform_metadata(metadata: &std::fs::Metadata, _is_dir: bool) -> (u3
 #[cfg(not(unix))]
 fn capture_platform_metadata(_metadata: &std::fs::Metadata, is_dir: bool) -> (u32, u32, u32) {
     (0, 0, if is_dir { 0o755 } else { 0o644 })
+}
+
+fn estimate_total_bytes(path: &Path) -> Result<u64> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_file() {
+        Ok(metadata.len())
+    } else if metadata.is_dir() {
+        let mut total = 0;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            total += estimate_total_bytes(&entry.path())?;
+        }
+        Ok(total)
+    } else {
+        Ok(0)
+    }
+}
+
+fn create_progress_bar(total_bytes: u64, message: &str) -> ProgressBar {
+    let pb = ProgressBar::new(total_bytes.max(1));
+    let style = ProgressStyle::with_template(
+        "{spinner} {msg:<20} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+    )
+    .unwrap()
+    .progress_chars("=>-");
+    pb.set_style(style);
+    pb.set_message(message.to_string());
+    pb
 }

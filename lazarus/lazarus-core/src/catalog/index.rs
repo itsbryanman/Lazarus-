@@ -14,9 +14,11 @@ pub enum ObjectType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     pub name: String,
+    #[serde(default)]
     pub mode: u32,
     pub size: u64,
-    pub modified: u64,
+    #[serde(default, alias = "modified")]
+    pub mtime: u64,
     #[serde(default)]
     pub uid: u32,
     #[serde(default)]
@@ -33,6 +35,15 @@ impl CatalogIndex {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let conn =
             Connection::open(db_path).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        conn.pragma_update(None, "journal_mode", &"WAL")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        conn.pragma_update(None, "synchronous", &"NORMAL")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        conn.pragma_update(None, "foreign_keys", &"ON")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
         let catalog = Self { conn };
         catalog.init_schema()?;
@@ -335,17 +346,16 @@ impl CatalogIndex {
 mod tests {
     use super::*;
 
-    fn create_test_catalog() -> CatalogIndex {
-        // Create an in-memory database for testing
-        let conn = Connection::open_in_memory().unwrap();
-        let catalog = CatalogIndex { conn };
-        catalog.init_schema().unwrap();
-        catalog
+    fn create_test_catalog() -> (tempfile::TempDir, CatalogIndex) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("catalog.db");
+        let catalog = CatalogIndex::new(&db_path).unwrap();
+        (temp_dir, catalog)
     }
 
     #[test]
     fn test_chunk_operations() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Insert a chunk
         let hash = "abc123";
@@ -363,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_object_operations() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Create a file object
         let metadata = b"encrypted metadata";
@@ -392,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_tree_operations() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Create parent and child objects
         let parent_id = catalog
@@ -415,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_file_chunks() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Create chunks
         catalog.upsert_chunk("chunk1", 100, 200).unwrap();
@@ -440,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_operations() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Create root object
         let root_id = catalog
@@ -473,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Initially empty
         let (chunks, objects, snapshots) = catalog.get_stats().unwrap();
@@ -498,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_list_all_chunk_hashes() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Add multiple chunks
         catalog.upsert_chunk("hash1", 100, 200).unwrap();
@@ -515,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_multiple_snapshots_ordering() {
-        let catalog = create_test_catalog();
+        let (_dir, catalog) = create_test_catalog();
 
         // Create multiple snapshots with different timestamps
         let root_id = catalog
