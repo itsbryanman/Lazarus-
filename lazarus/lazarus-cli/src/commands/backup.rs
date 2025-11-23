@@ -1,8 +1,9 @@
 use super::snapshot_utils::encrypt_snapshot_metadata;
 use clap::{ArgAction, Args};
+use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
-use lazarus_core::chunking::fixed_size::FixedSizeChunker;
+use lazarus_core::chunking::streaming::StreamingChunker;
 use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::{LazarusError, Result};
@@ -12,6 +13,8 @@ use lazarus_core::storage::local::LocalStorage;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{fs, path::Path, time::SystemTime};
+use tokio::io::BufReader;
+use tokio::task;
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
@@ -160,6 +163,37 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     Ok(())
 }
 
+struct ChunkProcessingResult {
+    order: usize,
+    hash_hex: String,
+    chunk_len: usize,
+    stored_data: Vec<u8>,
+}
+
+fn spawn_chunk_processing(
+    order: usize,
+    chunk: Vec<u8>,
+    key_manager: lazarus_core::encryption::key_manager::KeyManager,
+) -> task::JoinHandle<Result<ChunkProcessingResult>> {
+    task::spawn_blocking(move || {
+        let chunk_hash = blake3::hash(&chunk);
+        let hash_hex = chunk_hash.to_hex().to_string();
+
+        let encoded_chunk = adaptive::encode_chunk(&chunk)?;
+        let (encrypted_chunk, nonce) = key_manager.encrypt_data(&encoded_chunk)?;
+
+        let mut stored_data = nonce;
+        stored_data.extend_from_slice(&encrypted_chunk);
+
+        Ok(ChunkProcessingResult {
+            order,
+            hash_hex,
+            chunk_len: chunk.len(),
+            stored_data,
+        })
+    })
+}
+
 async fn backup_file(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -170,9 +204,6 @@ async fn backup_file(
 ) -> Result<i64> {
     progress.set_message(format!("Backing up {}", file_path.display()));
     progress.println(format!("Backing up file: {}", file_path.display()));
-
-    // Read file data
-    let data = tokio::fs::read(file_path).await?;
 
     // Get file metadata
     let metadata = tokio::fs::metadata(file_path).await?;
@@ -192,54 +223,93 @@ async fn backup_file(
     // Create object for file
     let file_object_id = catalog.create_object(ObjectType::File, &metadata_blob)?;
 
-    // Chunk the file
-    let chunker = FixedSizeChunker::new(&data, CHUNK_SIZE);
-    let mut chunk_order = 0;
+    let file = tokio::fs::File::open(file_path).await?;
+    let reader = BufReader::new(file);
+    let mut chunker = StreamingChunker::new(reader, CHUNK_SIZE);
 
-    for chunk in chunker {
-        // Hash the uncompressed chunk
-        let chunk_hash = blake3::hash(chunk);
-        let hash_hex = chunk_hash.to_hex().to_string();
+    let pipeline_depth = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2);
 
-        // Check if chunk already exists (deduplication)
-        if !catalog.chunk_exists(&hash_hex)? {
-            // Encode chunk with adaptive compression + header
-            let encoded_chunk = adaptive::encode_chunk(chunk)?;
+    let mut inflight: FuturesUnordered<_> = FuturesUnordered::new();
+    let mut scheduled_chunks = 0usize;
+    let mut eof = false;
 
-            // Encrypt with unique nonce
-            let (encrypted_chunk, nonce) = key_manager.encrypt_data(&encoded_chunk)?;
-
-            // Store chunk with nonce prepended (first 12 bytes are nonce)
-            let mut stored_data = nonce;
-            stored_data.extend_from_slice(&encrypted_chunk);
-
-            // Store to backend using hash-based sharding
-            let shard_dir = &hash_hex[..2];
-            storage
-                .write_once(
-                    &format!("{}/{}", shard_dir, hash_hex),
-                    &stored_data,
-                    retention,
-                )
-                .await?;
-
-            // Record in catalog
-            catalog.upsert_chunk(&hash_hex, stored_data.len(), chunk.len())?;
+    loop {
+        while inflight.len() < pipeline_depth && !eof {
+            match chunker.next_chunk().await? {
+                Some(chunk) => {
+                    let handle =
+                        spawn_chunk_processing(scheduled_chunks, chunk, key_manager.clone());
+                    inflight.push(handle);
+                    scheduled_chunks += 1;
+                }
+                None => {
+                    eof = true;
+                }
+            }
         }
 
-        // Add chunk to file mapping
-        catalog.add_file_chunk(file_object_id, &hash_hex, chunk_order)?;
-        chunk_order += 1;
+        if inflight.is_empty() {
+            break;
+        }
+
+        if let Some(result) = inflight.next().await {
+            let processed = result
+                .map_err(|e| LazarusError::Storage(format!("Chunk worker failed: {}", e)))??;
+            handle_processed_chunk(
+                processed,
+                catalog,
+                storage,
+                file_object_id,
+                retention,
+                progress,
+            )
+            .await?;
+        }
     }
 
-    progress.inc(file_metadata.size);
     progress.println(format!(
         "  ✓ {} ({} chunks)",
         file_path.display(),
-        chunk_order
+        scheduled_chunks
     ));
 
     Ok(file_object_id)
+}
+
+async fn handle_processed_chunk(
+    chunk: ChunkProcessingResult,
+    catalog: &CatalogIndex,
+    storage: &LocalStorage,
+    file_object_id: i64,
+    retention: Option<&RetentionLock>,
+    progress: &ProgressBar,
+) -> Result<()> {
+    let ChunkProcessingResult {
+        order,
+        hash_hex,
+        chunk_len,
+        stored_data,
+    } = chunk;
+
+    if !catalog.chunk_exists(&hash_hex)? {
+        let shard_dir = &hash_hex[..hash_hex.len().min(2)];
+        storage
+            .write_once(
+                &format!("{}/{}", shard_dir, hash_hex),
+                &stored_data,
+                retention,
+            )
+            .await?;
+        catalog.upsert_chunk(&hash_hex, stored_data.len(), chunk_len)?;
+    }
+
+    catalog.add_file_chunk(file_object_id, &hash_hex, order)?;
+    progress.inc(chunk_len as u64);
+
+    Ok(())
 }
 
 async fn backup_directory(

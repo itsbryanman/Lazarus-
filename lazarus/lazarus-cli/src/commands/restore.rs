@@ -13,9 +13,9 @@ use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
 #[cfg(unix)]
 use libc;
-use std::{io, path::Path};
 #[cfg(unix)]
 use std::{ffi::CString, os::unix::ffi::OsStrExt, os::unix::fs::PermissionsExt};
+use std::{io, path::Path};
 
 #[derive(Args)]
 pub struct RestoreArgs {
@@ -283,9 +283,7 @@ fn prompt_destination(default: Option<&str>) -> Result<String> {
     if let Some(value) = default {
         prompt = prompt.with_initial_text(value.to_string());
     }
-    let destination = prompt
-        .interact_text()
-        .map_err(dialoguer_error)?;
+    let destination = prompt.interact_text().map_err(dialoguer_error)?;
     Ok(destination)
 }
 

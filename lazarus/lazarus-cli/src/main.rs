@@ -26,6 +26,8 @@ enum Commands {
     Retention(commands::retention::RetentionArgs),
     /// Remove unreferenced data using a retention policy
     Prune(commands::prune::PruneArgs),
+    /// Security operations (key rotation, etc.)
+    Security(commands::security::SecurityArgs),
     /// Recovery utilities (ISO builder, etc.)
     Recover(commands::recover::RecoverArgs),
 }
@@ -43,6 +45,7 @@ async fn main() {
         Commands::Config(args) => commands::config::config(args).await,
         Commands::Retention(args) => commands::retention::retention(args).await,
         Commands::Prune(args) => commands::prune::prune(args).await,
+        Commands::Security(args) => commands::security::security(args).await,
         Commands::Recover(args) => commands::recover::recover(args).await,
     };
 

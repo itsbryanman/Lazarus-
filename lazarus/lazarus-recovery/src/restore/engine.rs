@@ -40,8 +40,8 @@ pub fn restore_snapshot(
 ) -> Result<(), String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     let args = RestoreArgs {
-        snapshot: snapshot_id.to_string(),
-        destination: destination.to_string(),
+        snapshot: Some(snapshot_id.to_string()),
+        destination: Some(destination.to_string()),
         repository: repo_path.to_string(),
         password: password.to_string(),
     };

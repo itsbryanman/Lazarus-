@@ -6,5 +6,6 @@ pub mod prune;
 pub mod recover;
 pub mod restore;
 pub mod retention;
+pub mod security;
 pub mod snapshot_utils;
 pub mod verify;

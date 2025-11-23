@@ -177,13 +177,25 @@ impl ConfigManager {
             "IMPORTANT: Keep your master password safe! Without it, your data cannot be recovered."
         );
 
-        Ok(key_manager)
+        Ok(key_manager.with_config_path(self.config_file_path()))
     }
 
     /// Open an existing repository
     pub async fn open_repository(&self, master_password: &str) -> Result<KeyManager> {
         let config = self.load_config().await?;
-        KeyManager::unlock_repository(master_password, &config)
+        let key_manager = KeyManager::unlock_repository(master_password, &config)?;
+        Ok(key_manager.with_config_path(self.config_file_path()))
+    }
+
+    /// Re-encrypt the repository envelope with a new password, validating the existing password.
+    pub async fn rotate_master_key(
+        &self,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        let key_manager = self.open_repository(current_password).await?;
+        key_manager.rotate_master_key(new_password)?;
+        Ok(())
     }
 
     /// Save repository configuration
@@ -211,6 +223,11 @@ impl ConfigManager {
     /// Get the repository path
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Location of the repo key/config envelope.
+    pub fn config_file_path(&self) -> PathBuf {
+        self.repo_path.join(CONFIG_FILE)
     }
 
     /// Get the data directory path

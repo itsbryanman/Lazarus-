@@ -6,6 +6,8 @@ use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHasher};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Configuration stored in the repository
 #[derive(Serialize, Deserialize, Clone)]
@@ -23,11 +25,14 @@ pub struct RepositoryConfig {
 }
 
 /// Key manager for handling encryption keys
+#[derive(Clone)]
 pub struct KeyManager {
     /// Repository encryption key (32 bytes for AES-256)
     repo_key: [u8; 32],
     /// Metadata encryption key (32 bytes for AES-256)
     metadata_key: [u8; 32],
+    /// Location of the encrypted key envelope on disk
+    config_path: Option<PathBuf>,
 }
 
 impl KeyManager {
@@ -84,6 +89,7 @@ impl KeyManager {
         let manager = KeyManager {
             repo_key,
             metadata_key,
+            config_path: None,
         };
 
         Ok((manager, config))
@@ -130,7 +136,14 @@ impl KeyManager {
         Ok(KeyManager {
             repo_key,
             metadata_key,
+            config_path: None,
         })
+    }
+
+    /// Attach the on-disk repo.key path so future operations (like rotation) can persist updates.
+    pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.config_path = Some(path.into());
+        self
     }
 
     /// Derive a master key from a password and salt using Argon2id
@@ -239,11 +252,68 @@ impl KeyManager {
         String::from_utf8(decrypted)
             .map_err(|_| LazarusError::EncryptionError("Invalid UTF-8 in metadata".into()))
     }
+
+    /// Re-encrypt the repository envelope with a new password-derived master key and persist it.
+    pub fn rotate_master_key(&self, new_password: &str) -> Result<()> {
+        let config_path = self.config_path.as_ref().ok_or_else(|| {
+            LazarusError::Storage(
+                "KeyManager missing repo.key path; cannot rotate master key".into(),
+            )
+        })?;
+
+        // Generate a fresh salt for the new master key derivation
+        let salt = SaltString::generate(&mut OsRng);
+        let master_key = Self::derive_master_key(new_password, salt.as_str())?;
+
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit};
+        use rand::RngCore;
+
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&master_key));
+        let mut repo_key_nonce = [0u8; 12];
+        let mut metadata_key_nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut repo_key_nonce);
+        rand::thread_rng().fill_bytes(&mut metadata_key_nonce);
+
+        let encrypted_repo_key = cipher
+            .encrypt(
+                GenericArray::from_slice(&repo_key_nonce),
+                &self.repo_key[..],
+            )
+            .map_err(|_| {
+                LazarusError::EncryptionError("Failed to encrypt repository key".into())
+            })?;
+
+        let encrypted_metadata_key = cipher
+            .encrypt(
+                GenericArray::from_slice(&metadata_key_nonce),
+                &self.metadata_key[..],
+            )
+            .map_err(|_| LazarusError::EncryptionError("Failed to encrypt metadata key".into()))?;
+
+        let config = RepositoryConfig {
+            salt: salt.as_str().to_string(),
+            encrypted_repo_key,
+            encrypted_metadata_key,
+            repo_key_nonce: repo_key_nonce.to_vec(),
+            metadata_key_nonce: metadata_key_nonce.to_vec(),
+        };
+
+        Self::persist_repo_config(config_path, &config)
+    }
+
+    fn persist_repo_config(path: &Path, config: &RepositoryConfig) -> Result<()> {
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|e| LazarusError::SerializationError(e.to_string()))?;
+        fs::write(path, json)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_init_and_unlock() {
@@ -363,5 +433,29 @@ mod tests {
 
         // Should fail
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rotate_master_key_persists_new_config() {
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("repo.key");
+
+        let (manager, config) = KeyManager::init_repository("old_password").unwrap();
+        let json = serde_json::to_string_pretty(&config).expect("serialize config");
+        std::fs::write(&config_path, json).expect("write config");
+
+        let manager = manager.with_config_path(&config_path);
+        manager
+            .rotate_master_key("new_password")
+            .expect("rotate master key");
+
+        let updated_json = std::fs::read_to_string(&config_path).expect("read config");
+        let updated: RepositoryConfig =
+            serde_json::from_str(&updated_json).expect("deserialize config");
+
+        assert_ne!(updated.salt, config.salt);
+
+        let unlocked = KeyManager::unlock_repository("new_password", &updated).unwrap();
+        assert_eq!(unlocked.get_repo_key(), manager.get_repo_key());
     }
 }

@@ -1,8 +1,9 @@
 use super::backend::{RetentionLock, StorageBackend};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
+use rand::{Rng, distributions::Alphanumeric};
 use std::path::{Path, PathBuf};
-use tokio::{fs, task};
+use tokio::{fs, io::AsyncWriteExt, task};
 
 #[derive(Clone)]
 pub struct LocalStorage {
@@ -100,10 +101,42 @@ impl LocalStorage {
 impl StorageBackend for LocalStorage {
     async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         let path = self.resolve_key(key);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.path.clone());
+        fs::create_dir_all(&parent).await?;
+
+        let suffix: String = {
+            let mut rng = rand::thread_rng();
+            (0..16).map(|_| rng.sample(Alphanumeric) as char).collect()
+        };
+        let tmp_name = format!(
+            ".tmp.{}.{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "chunk".to_string()),
+            suffix
+        );
+        let tmp_path = parent.join(tmp_name);
+
+        let mut temp_file = fs::File::create(&tmp_path).await?;
+        temp_file.write_all(data).await?;
+        temp_file.sync_all().await?;
+        drop(temp_file);
+
+        let tmp_for_task = tmp_path.clone();
+        let final_for_task = path.clone();
+        let rename_result =
+            task::spawn_blocking(move || std::fs::rename(tmp_for_task, final_for_task))
+                .await
+                .map_err(|e| Error::Storage(format!("Atomic rename task failed: {}", e)))?;
+
+        if let Err(err) = rename_result {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(Error::Io(err));
         }
-        fs::write(&path, data).await?;
+
         Ok(())
     }
 
