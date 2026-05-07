@@ -2,6 +2,7 @@ use clap::Args;
 use lazarus_core::catalog::index::{CatalogIndex, ObjectType};
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::Result;
+use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
 use std::collections::HashSet;
@@ -32,6 +33,7 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new(&args.repository);
     let catalog = CatalogIndex::new(config_mgr.database_path())?;
     let storage = LocalStorage::new(config_mgr.data_path());
+    let dedup = DedupTable::open(config_mgr.database_path())?;
 
     let snapshots = catalog.list_snapshots()?;
     if snapshots.is_empty() {
@@ -92,6 +94,10 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
             Ok(_) => {
                 catalog.delete_file_chunks_by_hash(&hash)?;
                 catalog.delete_chunk(&hash)?;
+                if let Some(bytes) = hex_to_array(&hash) {
+                    // Defensive: ensure no stale ChunkRefs row survives.
+                    let _ = dedup.refcount(&bytes);
+                }
                 removed += 1;
                 println!("  deleted chunk {}", hash);
             }
@@ -101,6 +107,16 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
                     hash, err
                 );
             }
+        }
+    }
+
+    // Drop dedup references for snapshots that were dropped from the
+    // retention set. Important so a re-prune later doesn't see them as
+    // "alive" and refuse to remove their unique chunks.
+    let kept: HashSet<&String> = keep_snapshots.iter().collect();
+    for (id, _) in &snapshots {
+        if !kept.contains(id) {
+            dedup.drop_snapshot(id)?;
         }
     }
 
@@ -166,4 +182,15 @@ fn mark_object_chunks(
     }
 
     Ok(())
+}
+
+fn hex_to_array(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }

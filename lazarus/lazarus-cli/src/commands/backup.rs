@@ -8,8 +8,10 @@ use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::{LazarusError, Result};
 use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
+use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::storage::backend::{RetentionLock, StorageBackend};
 use lazarus_core::storage::local::LocalStorage;
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{fs, path::Path, time::SystemTime};
@@ -105,6 +107,7 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
 
     // Backup the source (file or directory)
     let lock_ref = retention_lock.as_ref();
+    let mut chunk_set: HashSet<[u8; 32]> = HashSet::new();
     let root_object_id = if source_path.is_file() {
         backup_file(
             &key_manager,
@@ -113,6 +116,7 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
             source_path,
             lock_ref,
             &progress,
+            &mut chunk_set,
         )
         .await?
     } else if source_path.is_dir() {
@@ -123,6 +127,7 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
             source_path,
             lock_ref,
             &progress,
+            &mut chunk_set,
         )
         .await?
     } else {
@@ -149,6 +154,13 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
         root_object_id,
         &snapshot_metadata_blob,
     )?;
+
+    // Record dedup references for every chunk this snapshot uses. The
+    // DedupTable lives in the same SQLite DB as the catalog, so this is just
+    // an extra batch insert per snapshot.
+    let chunks: Vec<[u8; 32]> = chunk_set.into_iter().collect();
+    let mut dedup = DedupTable::open(config_mgr.database_path())?;
+    dedup.add_references_batch(&snapshot_id, &chunks)?;
 
     progress.finish_with_message("Backup completed successfully");
     println!("✓ Backup completed successfully!");
@@ -201,6 +213,7 @@ async fn backup_file(
     file_path: &Path,
     retention: Option<&RetentionLock>,
     progress: &ProgressBar,
+    chunk_set: &mut HashSet<[u8; 32]>,
 ) -> Result<i64> {
     progress.set_message(format!("Backing up {}", file_path.display()));
     progress.println(format!("Backing up file: {}", file_path.display()));
@@ -265,6 +278,7 @@ async fn backup_file(
                 file_object_id,
                 retention,
                 progress,
+                chunk_set,
             )
             .await?;
         }
@@ -286,6 +300,7 @@ async fn handle_processed_chunk(
     file_object_id: i64,
     retention: Option<&RetentionLock>,
     progress: &ProgressBar,
+    chunk_set: &mut HashSet<[u8; 32]>,
 ) -> Result<()> {
     let ChunkProcessingResult {
         order,
@@ -307,9 +322,23 @@ async fn handle_processed_chunk(
     }
 
     catalog.add_file_chunk(file_object_id, &hash_hex, order)?;
+    if let Some(bytes) = hex_to_array(&hash_hex) {
+        chunk_set.insert(bytes);
+    }
     progress.inc(chunk_len as u64);
 
     Ok(())
+}
+
+fn hex_to_array(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 async fn backup_directory(
@@ -319,6 +348,7 @@ async fn backup_directory(
     dir_path: &Path,
     retention: Option<&RetentionLock>,
     progress: &ProgressBar,
+    chunk_set: &mut HashSet<[u8; 32]>,
 ) -> Result<i64> {
     progress.set_message(format!("Scanning {}", dir_path.display()));
     progress.println(format!("Backing up directory: {}", dir_path.display()));
@@ -355,6 +385,7 @@ async fn backup_directory(
                 &entry_path,
                 retention,
                 progress,
+                chunk_set,
             )
             .await?
         } else if entry_path.is_dir() {
@@ -365,6 +396,7 @@ async fn backup_directory(
                 &entry_path,
                 retention,
                 progress,
+                chunk_set,
             ))
             .await?
         } else {
