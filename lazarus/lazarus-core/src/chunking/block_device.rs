@@ -232,13 +232,17 @@ fn seek_data_extents(path: &Path, size: u64) -> std::io::Result<Vec<Extent>> {
     let mut cursor: i64 = 0;
     let max: i64 = i64::try_from(size).unwrap_or(i64::MAX);
 
+    // ENXIO from lseek(SEEK_DATA) means "no more data after this offset",
+    // which is the documented way to signal the end of the data scan.
+    const ENXIO: i32 = 6;
+
     loop {
         // Find the next data region at or after `cursor`.
         let data_start = unsafe { lseek64(fd, cursor, SEEK_DATA) };
         if data_start < 0 {
             // ENXIO means "no more data": return what we have so far.
             let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(6 /* ENXIO */) {
+            if err.raw_os_error() == Some(ENXIO) {
                 return Ok(extents);
             }
             return Err(err);

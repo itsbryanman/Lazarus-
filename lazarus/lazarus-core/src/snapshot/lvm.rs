@@ -297,7 +297,19 @@ fn path_is_lvm_volume(path: &Path) -> Option<bool> {
     // but for a `supports()` hint this string-level inspection is enough —
     // `snapshot()` will surface a precise error if we're wrong.
     let s = path.to_str()?;
-    Some(s.starts_with("/dev/mapper/") || (s.starts_with("/dev/") && s.matches('/').count() == 3))
+    if let Some(rest) = s.strip_prefix("/dev/mapper/") {
+        return Some(!rest.is_empty() && !rest.contains('/'));
+    }
+    if let Some(rest) = s.strip_prefix("/dev/") {
+        // Looking for exactly "<vg>/<lv>" with both components non-empty
+        // and no further nesting.
+        let mut parts = rest.split('/');
+        let vg = parts.next();
+        let lv = parts.next();
+        let extra = parts.next();
+        return Some(matches!((vg, lv, extra), (Some(v), Some(l), None) if !v.is_empty() && !l.is_empty()));
+    }
+    Some(false)
 }
 
 #[cfg(test)]
@@ -345,7 +357,11 @@ mod tests {
         let _ = LvmSnapshotter::supports(Path::new("/nonexistent"));
         if cfg!(target_os = "linux") {
             assert!(LvmSnapshotter::supports(Path::new("/dev/vg0/data")));
+            assert!(LvmSnapshotter::supports(Path::new("/dev/mapper/vg0-data")));
             assert!(!LvmSnapshotter::supports(Path::new("/home")));
+            // Nested paths under /dev/ that aren't <vg>/<lv> shouldn't match.
+            assert!(!LvmSnapshotter::supports(Path::new("/dev/a/b/c")));
+            assert!(!LvmSnapshotter::supports(Path::new("/dev/sda1")));
         } else {
             assert!(!LvmSnapshotter::supports(Path::new("/dev/vg0/data")));
         }
