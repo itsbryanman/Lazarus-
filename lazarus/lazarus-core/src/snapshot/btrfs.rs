@@ -178,13 +178,18 @@ mod libc_compat {
 
     use std::os::raw::{c_char, c_int, c_long};
 
+    /// Generous upper bound on the platform-specific tail of the
+    /// `statfs` struct. The Linux ABI defines roughly 100 bytes after
+    /// `f_type`; FreeBSD's variant is smaller. 256 bytes is comfortably
+    /// larger than any known layout, which lets the kernel write into
+    /// the buffer without us needing per-arch ifdefs for one syscall.
+    pub const STATFS_TAIL_BYTES: usize = 256;
+
     #[repr(C)]
     pub struct statfs {
         pub f_type: c_long,
-        // The rest of the structure is platform-specific; we declare a
-        // generous tail of opaque bytes so the kernel can write into it.
-        // 256 bytes is well above the largest known statfs layout.
-        _pad: [u8; 256],
+        // Opaque, platform-specific tail. Only `f_type` is read.
+        _pad: [u8; STATFS_TAIL_BYTES],
     }
 
     unsafe extern "C" {
