@@ -4,6 +4,7 @@ pub mod compression;
 pub mod config;
 pub mod encryption;
 pub mod error;
+pub mod integrity;
 pub mod security;
 pub mod snapshot;
 pub mod storage;
