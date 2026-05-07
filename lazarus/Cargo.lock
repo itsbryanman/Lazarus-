@@ -2203,6 +2203,7 @@ dependencies = [
  "aws-sdk-s3",
  "aws-smithy-types",
  "blake3",
+ "hostname",
  "rand 0.8.5",
  "rusqlite",
  "serde",
