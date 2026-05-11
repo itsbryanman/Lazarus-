@@ -35,10 +35,16 @@ async fn full_cycle_backup_and_restore_matches_hashes() {
         .expect("init repository");
 
     let backup_args = BackupArgs {
-        source: source_path.to_string_lossy().to_string(),
+        source: Some(source_path.to_string_lossy().to_string()),
         repository: repo_path.to_string_lossy().to_string(),
         password: PASSWORD.to_string(),
         force: false,
+        consistent: false,
+        snapshotter: lazarus_cli::commands::backup::SnapshotterChoice::Auto,
+        block_mode: false,
+        device: None,
+        no_hooks: false,
+        hook_templates: Vec::new(),
     };
     backup(&backup_args).await.expect("backup succeeds");
 
