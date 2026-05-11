@@ -180,23 +180,26 @@ fn validate_args(args: &BackupArgs) -> Result<CaptureConfig> {
 }
 
 /// Resolve the user-chosen snapshotter into a concrete backend (or `None`
-/// for "skip OS snapshot"). `Auto` consults each backend's `supports()` hint.
+/// for "skip OS snapshot"). `Auto` consults each backend's `supports()` hint
+/// and returns both the backend and the canonical name of whichever backend
+/// matched, so callers can record it in snapshot metadata without
+/// re-running the detection.
 fn pick_snapshotter(
     choice: SnapshotterChoice,
     source: &Path,
-) -> Result<Option<Box<dyn BlockSnapshotter>>> {
+) -> Result<Option<(Box<dyn BlockSnapshotter>, &'static str)>> {
     match choice {
         SnapshotterChoice::None => Ok(None),
-        SnapshotterChoice::Lvm => Ok(Some(Box::new(LvmSnapshotter))),
-        SnapshotterChoice::Btrfs => Ok(Some(Box::new(BtrfsSnapshotter))),
-        SnapshotterChoice::Zfs => Ok(Some(Box::new(ZfsSnapshotter))),
+        SnapshotterChoice::Lvm => Ok(Some((Box::new(LvmSnapshotter), "lvm"))),
+        SnapshotterChoice::Btrfs => Ok(Some((Box::new(BtrfsSnapshotter), "btrfs"))),
+        SnapshotterChoice::Zfs => Ok(Some((Box::new(ZfsSnapshotter), "zfs"))),
         SnapshotterChoice::Auto => {
             if LvmSnapshotter::supports(source) {
-                Ok(Some(Box::new(LvmSnapshotter)))
+                Ok(Some((Box::new(LvmSnapshotter), "lvm")))
             } else if BtrfsSnapshotter::supports(source) {
-                Ok(Some(Box::new(BtrfsSnapshotter)))
+                Ok(Some((Box::new(BtrfsSnapshotter), "btrfs")))
             } else if ZfsSnapshotter::supports(source) {
-                Ok(Some(Box::new(ZfsSnapshotter)))
+                Ok(Some((Box::new(ZfsSnapshotter), "zfs")))
             } else {
                 Err(LazarusError::Storage(format!(
                     "no snapshotter supports {}; pass --snapshotter none to bypass",
@@ -338,7 +341,7 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     // Run the actual capture inside a closure so we can ensure post hooks
     // run regardless of outcome.
     let capture_result =
-        run_capture(args, &cfg, &key_manager, &catalog, &storage, retention_lock.as_ref(),
+        run_capture(&cfg, &key_manager, &catalog, &storage, retention_lock.as_ref(),
                     &mut snapshot_mount, &mut snapshotter_used).await;
 
     // Tear down OS snapshot, then run post hooks. We do this regardless of
@@ -416,7 +419,6 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
 /// Mutates `snapshot_mount` so the outer `backup` can guarantee teardown
 /// even when this function returns an error.
 async fn run_capture(
-    _args: &BackupArgs,
     cfg: &CaptureConfig,
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -430,23 +432,9 @@ async fn run_capture(
             // Possibly redirect reads through an OS snapshot mount.
             let mut read_path = cfg.target.clone();
             if cfg.consistent {
-                if let Some(backend) = pick_snapshotter(cfg.snapshotter, &cfg.target)? {
+                if let Some((backend, label)) = pick_snapshotter(cfg.snapshotter, &cfg.target)? {
                     let mount = backend.snapshot(&cfg.target)?;
-                    *snapshotter_used = match cfg.snapshotter {
-                        SnapshotterChoice::Auto => {
-                            // Re-detect the matched backend for reporting.
-                            if LvmSnapshotter::supports(&cfg.target) {
-                                "lvm"
-                            } else if BtrfsSnapshotter::supports(&cfg.target) {
-                                "btrfs"
-                            } else if ZfsSnapshotter::supports(&cfg.target) {
-                                "zfs"
-                            } else {
-                                "unknown"
-                            }
-                        }
-                        other => snapshotter_label(other),
-                    };
+                    *snapshotter_used = label;
                     read_path = mount.path().to_path_buf();
                     println!(
                         "Captured consistent snapshot at {} (via {})",
