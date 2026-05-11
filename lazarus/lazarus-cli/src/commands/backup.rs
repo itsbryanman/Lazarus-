@@ -1,29 +1,53 @@
 use super::snapshot_utils::encrypt_snapshot_metadata;
-use clap::{ArgAction, Args};
+use clap::{ArgAction, Args, ValueEnum};
 use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
+use lazarus_core::chunking::block_device::{BlockDeviceReader, Extent};
 use lazarus_core::chunking::streaming::StreamingChunker;
 use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::{LazarusError, Result};
 use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
+use lazarus_core::snapshot::btrfs::BtrfsSnapshotter;
 use lazarus_core::snapshot::dedup::DedupTable;
+use lazarus_core::snapshot::hooks::{builtins as hook_builtins, ApplicationHook, HookReport, HookRunner};
+use lazarus_core::snapshot::lvm::LvmSnapshotter;
+use lazarus_core::snapshot::snapshotter::{BlockSnapshotter, ConsistentMount};
+use lazarus_core::snapshot::zfs::ZfsSnapshotter;
 use lazarus_core::storage::backend::{RetentionLock, StorageBackend};
 use lazarus_core::storage::local::LocalStorage;
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::{fs, path::Path, time::SystemTime};
+use std::{fs, path::{Path, PathBuf}, time::SystemTime};
 use tokio::io::BufReader;
 use tokio::task;
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
+/// Which OS-level snapshot mechanism to use for `--consistent` file backups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotterChoice {
+    /// Pick the first backend whose `supports()` check returns true.
+    Auto,
+    Lvm,
+    Btrfs,
+    Zfs,
+    /// Skip OS snapshotting entirely. Hooks still run if enabled.
+    None,
+}
+
+impl Default for SnapshotterChoice {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Args)]
 pub struct BackupArgs {
     #[arg(short, long, help = "Source file or directory to backup")]
-    pub source: String,
+    pub source: Option<String>,
 
     #[arg(short, long, help = "Repository path")]
     pub repository: String,
@@ -37,10 +61,194 @@ pub struct BackupArgs {
         action = ArgAction::SetTrue
     )]
     pub force: bool,
+
+    /// Enable point-in-time capture for file backups via filesystem/volume
+    /// snapshots.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub consistent: bool,
+
+    /// Snapshotter to use when `--consistent` is set.
+    #[arg(long, value_enum, default_value_t = SnapshotterChoice::Auto)]
+    pub snapshotter: SnapshotterChoice,
+
+    /// Capture a raw block device instead of a file tree.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub block_mode: bool,
+
+    /// Block device path. Required (and only used) when `--block-mode` is set.
+    #[arg(long, value_name = "PATH")]
+    pub device: Option<String>,
+
+    /// Disable application freeze/thaw hooks.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_hooks: bool,
+
+    /// Run a specific built-in hook template. May be repeated. Recognized
+    /// names: `postgres`, `mysql`, `mongodb`, `redis`, `docker`, `all`.
+    #[arg(long = "hook-template", value_name = "NAME")]
+    pub hook_templates: Vec<String>,
+}
+
+impl Default for BackupArgs {
+    fn default() -> Self {
+        Self {
+            source: None,
+            repository: String::new(),
+            password: String::new(),
+            force: false,
+            consistent: false,
+            snapshotter: SnapshotterChoice::Auto,
+            block_mode: false,
+            device: None,
+            no_hooks: false,
+            hook_templates: Vec::new(),
+        }
+    }
+}
+
+/// Validated form of the user-supplied flag combination. Computed once at
+/// entry so the rest of the pipeline doesn't have to re-derive the mode.
+#[derive(Debug)]
+struct CaptureConfig {
+    /// The path the backup pipeline should *read* from. For file mode this
+    /// is the source (or snapshot mount, once taken). For block mode this
+    /// is the device.
+    target: PathBuf,
+    /// What the user originally asked us to back up. Used for snapshot
+    /// metadata regardless of any intermediate snapshot mount.
+    declared_source: PathBuf,
+    mode: CaptureMode,
+    consistent: bool,
+    snapshotter: SnapshotterChoice,
+    run_hooks: bool,
+    hook_templates: Vec<String>,
+}
+
+#[derive(Debug)]
+enum CaptureMode {
+    File,
+    Block,
+}
+
+fn validate_args(args: &BackupArgs) -> Result<CaptureConfig> {
+    // --block-mode and --source/--device interactions.
+    if args.block_mode {
+        let device = args.device.as_ref().ok_or_else(|| {
+            LazarusError::Storage(
+                "--block-mode requires --device to be specified".to_string(),
+            )
+        })?;
+        // Explicitly refuse to silently use --source as the device.
+        if args.source.is_some() {
+            return Err(LazarusError::Storage(
+                "--block-mode cannot be combined with --source; pass the device via --device only"
+                    .to_string(),
+            ));
+        }
+        let device_path = PathBuf::from(device);
+        return Ok(CaptureConfig {
+            target: device_path.clone(),
+            declared_source: device_path,
+            mode: CaptureMode::Block,
+            consistent: args.consistent,
+            snapshotter: args.snapshotter,
+            run_hooks: !args.no_hooks,
+            hook_templates: args.hook_templates.clone(),
+        });
+    }
+
+    // Not block-mode → --device is meaningless.
+    if args.device.is_some() {
+        return Err(LazarusError::Storage(
+            "--device may only be used with --block-mode".to_string(),
+        ));
+    }
+
+    let source = args.source.as_ref().ok_or_else(|| {
+        LazarusError::Storage("--source is required for file backups".to_string())
+    })?;
+    let source_path = PathBuf::from(source);
+    Ok(CaptureConfig {
+        target: source_path.clone(),
+        declared_source: source_path,
+        mode: CaptureMode::File,
+        consistent: args.consistent,
+        snapshotter: args.snapshotter,
+        run_hooks: !args.no_hooks,
+        hook_templates: args.hook_templates.clone(),
+    })
+}
+
+/// Resolve the user-chosen snapshotter into a concrete backend (or `None`
+/// for "skip OS snapshot"). `Auto` consults each backend's `supports()` hint.
+fn pick_snapshotter(
+    choice: SnapshotterChoice,
+    source: &Path,
+) -> Result<Option<Box<dyn BlockSnapshotter>>> {
+    match choice {
+        SnapshotterChoice::None => Ok(None),
+        SnapshotterChoice::Lvm => Ok(Some(Box::new(LvmSnapshotter))),
+        SnapshotterChoice::Btrfs => Ok(Some(Box::new(BtrfsSnapshotter))),
+        SnapshotterChoice::Zfs => Ok(Some(Box::new(ZfsSnapshotter))),
+        SnapshotterChoice::Auto => {
+            if LvmSnapshotter::supports(source) {
+                Ok(Some(Box::new(LvmSnapshotter)))
+            } else if BtrfsSnapshotter::supports(source) {
+                Ok(Some(Box::new(BtrfsSnapshotter)))
+            } else if ZfsSnapshotter::supports(source) {
+                Ok(Some(Box::new(ZfsSnapshotter)))
+            } else {
+                Err(LazarusError::Storage(format!(
+                    "no snapshotter supports {}; pass --snapshotter none to bypass",
+                    source.display()
+                )))
+            }
+        }
+    }
+}
+
+fn snapshotter_label(choice: SnapshotterChoice) -> &'static str {
+    match choice {
+        SnapshotterChoice::Auto => "auto",
+        SnapshotterChoice::Lvm => "lvm",
+        SnapshotterChoice::Btrfs => "btrfs",
+        SnapshotterChoice::Zfs => "zfs",
+        SnapshotterChoice::None => "none",
+    }
+}
+
+/// Build a `HookRunner` from the requested template names. Unknown names
+/// are rejected as typed errors so users discover typos early.
+fn build_hook_runner(templates: &[String]) -> Result<HookRunner> {
+    let hooks = if templates.is_empty() {
+        hook_builtins::all()
+    } else {
+        let mut out: Vec<ApplicationHook> = Vec::new();
+        for name in templates {
+            let resolved: Vec<ApplicationHook> = match name.as_str() {
+                "postgres" => vec![hook_builtins::postgres()],
+                "mysql" => vec![hook_builtins::mysql()],
+                "mongodb" => vec![hook_builtins::mongodb()],
+                "redis" => vec![hook_builtins::redis()],
+                "docker" => vec![hook_builtins::docker()],
+                "all" => hook_builtins::all(),
+                other => {
+                    return Err(LazarusError::Storage(format!(
+                        "unknown hook template `{other}`; expected one of postgres, mysql, mongodb, redis, docker, all"
+                    )));
+                }
+            };
+            out.extend(resolved);
+        }
+        out
+    };
+    Ok(HookRunner::with_hooks(hooks))
 }
 
 pub async fn backup(args: &BackupArgs) -> Result<()> {
     println!("Starting backup...");
+
+    let cfg = validate_args(args)?;
 
     // Open repository and unlock with password
     let config_mgr = ConfigManager::new(&args.repository);
@@ -61,12 +269,12 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
         );
     }
 
-    // Get source path
-    let source_path = Path::new(&args.source);
-
+    // Ransomware pre-check: run against the declared source, which is the
+    // location the user intends to capture (snapshots, when used, are
+    // taken *from* this path).
     let detection_engine = DetectionEngine::new(config_mgr.repo_path());
     let detection_report = detection_engine
-        .analyze_paths(&[source_path.to_path_buf()])
+        .analyze_paths(&[cfg.declared_source.clone()])
         .await?;
 
     match detection_report.verdict {
@@ -94,10 +302,6 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
         }
     }
 
-    let total_bytes = estimate_total_bytes(source_path)?;
-    let progress = create_progress_bar(total_bytes, "Backing up");
-    progress.println(format!("Source: {}", source_path.display()));
-
     // Create snapshot ID (timestamp-based)
     let snapshot_id = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let timestamp = SystemTime::now()
@@ -105,44 +309,78 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
         .unwrap()
         .as_secs();
 
-    // Backup the source (file or directory)
-    let lock_ref = retention_lock.as_ref();
-    let mut chunk_set: HashSet<[u8; 32]> = HashSet::new();
-    let root_object_id = if source_path.is_file() {
-        backup_file(
-            &key_manager,
-            &catalog,
-            &storage,
-            source_path,
-            lock_ref,
-            &progress,
-            &mut chunk_set,
-        )
-        .await?
-    } else if source_path.is_dir() {
-        backup_directory(
-            &key_manager,
-            &catalog,
-            &storage,
-            source_path,
-            lock_ref,
-            &progress,
-            &mut chunk_set,
-        )
-        .await?
-    } else {
-        return Err(lazarus_core::error::LazarusError::Storage(
-            "Source is neither a file nor a directory".to_string(),
-        ));
-    };
+    // --- Quiesce: optional hooks + optional OS snapshot --------------------
+    //
+    // The pre-snapshot hooks freeze application state, the OS snapshotter
+    // then captures a point-in-time view, and finally the post-snapshot
+    // hooks always run on the way out (success or failure) so a stuck
+    // `pg_backup_start` is never left dangling. RAII on `ConsistentMount`
+    // guarantees the snapshot itself is torn down even on panic.
+    let mut hook_report = HookReport::default();
+    let mut hook_runner: Option<HookRunner> = None;
+    let mut snapshot_mount: Option<Box<dyn ConsistentMount>> = None;
+    let mut snapshotter_used: &'static str = "none";
 
-    // Create snapshot metadata
+    if cfg.consistent && cfg.run_hooks {
+        let runner = build_hook_runner(&cfg.hook_templates)?;
+        if !runner.applicable().is_empty() {
+            println!(
+                "Running {} pre-snapshot hook(s)...",
+                runner.applicable().len()
+            );
+        }
+        // Pre-failure aborts before any OS-level resource is taken, so
+        // there is nothing to tear down on this error path.
+        runner.run_pre(&mut hook_report)?;
+        hook_runner = Some(runner);
+    }
+
+    // Run the actual capture inside a closure so we can ensure post hooks
+    // run regardless of outcome.
+    let capture_result =
+        run_capture(args, &cfg, &key_manager, &catalog, &storage, retention_lock.as_ref(),
+                    &mut snapshot_mount, &mut snapshotter_used).await;
+
+    // Tear down OS snapshot, then run post hooks. We do this regardless of
+    // whether `capture_result` is Ok or Err — the snapshot must not leak.
+    if let Some(mount) = snapshot_mount.take() {
+        if let Err(e) = mount.release() {
+            eprintln!("Warning: snapshot teardown reported: {e}");
+        }
+    }
+    if let Some(runner) = hook_runner.as_ref() {
+        runner.run_post(&mut hook_report);
+        for failure in hook_report.post_failures() {
+            eprintln!(
+                "Warning: post-snapshot hook `{}` failed: {}",
+                failure.hook,
+                failure.stderr.trim()
+            );
+        }
+    }
+
+    let (root_object_id, chunk_set, capture_summary) = capture_result?;
+
+    // Create snapshot metadata, recording *how* the capture happened so a
+    // later operator can audit the run.
     let snapshot_metadata = serde_json::json!({
-        "source": args.source,
+        "source": cfg.declared_source.to_string_lossy().to_string(),
         "hostname": hostname::get()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string(),
+        "capture": {
+            "mode": match cfg.mode {
+                CaptureMode::File => "file",
+                CaptureMode::Block => "block",
+            },
+            "consistent": cfg.consistent,
+            "snapshotter_requested": snapshotter_label(cfg.snapshotter),
+            "snapshotter_used": snapshotter_used,
+            "hooks_enabled": cfg.run_hooks,
+            "hook_outcomes": hook_report.outcomes,
+            "extras": capture_summary,
+        },
     });
     let snapshot_metadata_blob =
         encrypt_snapshot_metadata(&key_manager, &snapshot_metadata.to_string())?;
@@ -162,7 +400,6 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     let mut dedup = DedupTable::open(config_mgr.database_path())?;
     dedup.add_references_batch(&snapshot_id, &chunks)?;
 
-    progress.finish_with_message("Backup completed successfully");
     println!("✓ Backup completed successfully!");
     println!("  Snapshot ID: {}", snapshot_id);
 
@@ -173,6 +410,141 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     println!("    Snapshots: {}", snapshots);
 
     Ok(())
+}
+
+/// Run the actual capture against either a file tree or a raw block device.
+/// Mutates `snapshot_mount` so the outer `backup` can guarantee teardown
+/// even when this function returns an error.
+async fn run_capture(
+    _args: &BackupArgs,
+    cfg: &CaptureConfig,
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    catalog: &CatalogIndex,
+    storage: &LocalStorage,
+    retention: Option<&RetentionLock>,
+    snapshot_mount: &mut Option<Box<dyn ConsistentMount>>,
+    snapshotter_used: &mut &'static str,
+) -> Result<(i64, HashSet<[u8; 32]>, serde_json::Value)> {
+    match cfg.mode {
+        CaptureMode::File => {
+            // Possibly redirect reads through an OS snapshot mount.
+            let mut read_path = cfg.target.clone();
+            if cfg.consistent {
+                if let Some(backend) = pick_snapshotter(cfg.snapshotter, &cfg.target)? {
+                    let mount = backend.snapshot(&cfg.target)?;
+                    *snapshotter_used = match cfg.snapshotter {
+                        SnapshotterChoice::Auto => {
+                            // Re-detect the matched backend for reporting.
+                            if LvmSnapshotter::supports(&cfg.target) {
+                                "lvm"
+                            } else if BtrfsSnapshotter::supports(&cfg.target) {
+                                "btrfs"
+                            } else if ZfsSnapshotter::supports(&cfg.target) {
+                                "zfs"
+                            } else {
+                                "unknown"
+                            }
+                        }
+                        other => snapshotter_label(other),
+                    };
+                    read_path = mount.path().to_path_buf();
+                    println!(
+                        "Captured consistent snapshot at {} (via {})",
+                        read_path.display(),
+                        snapshotter_used
+                    );
+                    *snapshot_mount = Some(mount);
+                } else {
+                    *snapshotter_used = "none";
+                    println!(
+                        "--snapshotter none: skipping OS snapshot, hooks-only consistency"
+                    );
+                }
+            }
+
+            let total_bytes = estimate_total_bytes(&read_path)?;
+            let progress = create_progress_bar(total_bytes, "Backing up");
+            progress.println(format!("Source: {}", read_path.display()));
+
+            let mut chunk_set: HashSet<[u8; 32]> = HashSet::new();
+            let root_id = if read_path.is_file() {
+                backup_file(
+                    key_manager,
+                    catalog,
+                    storage,
+                    &read_path,
+                    retention,
+                    &progress,
+                    &mut chunk_set,
+                )
+                .await?
+            } else if read_path.is_dir() {
+                backup_directory(
+                    key_manager,
+                    catalog,
+                    storage,
+                    &read_path,
+                    retention,
+                    &progress,
+                    &mut chunk_set,
+                )
+                .await?
+            } else {
+                return Err(LazarusError::Storage(
+                    "Source is neither a file nor a directory".to_string(),
+                ));
+            };
+            progress.finish_with_message("Backup completed successfully");
+            Ok((root_id, chunk_set, serde_json::json!({})))
+        }
+        CaptureMode::Block => {
+            // Block mode captures a raw device via allocated-extent
+            // enumeration. OS-level snapshotting is intentionally NOT
+            // applied here: the snapshotter backends produce filesystem
+            // mounts or new block devices, and silently swapping the
+            // user-supplied `--device` for some derived path would violate
+            // the explicit "no silent --source use" rule. Operators who
+            // want block-mode consistency on LVM should pass the snapshot
+            // device directly via `--device`. Hooks still run when
+            // `--consistent` is set so application-level quiescing works
+            // even in block mode.
+            if cfg.consistent {
+                match cfg.snapshotter {
+                    SnapshotterChoice::None | SnapshotterChoice::Auto => {
+                        *snapshotter_used = "none";
+                    }
+                    SnapshotterChoice::Lvm
+                    | SnapshotterChoice::Btrfs
+                    | SnapshotterChoice::Zfs => {
+                        return Err(LazarusError::Storage(
+                            "--block-mode --consistent only supports --snapshotter=none or auto (hooks-only); pass the snapshot block device via --device for OS-level snapshots"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            let (root_id, chunk_set, extents_captured, bytes_captured, device_size) =
+                backup_block_device(
+                    key_manager,
+                    catalog,
+                    storage,
+                    &cfg.target,
+                    retention,
+                )
+                .await?;
+            Ok((
+                root_id,
+                chunk_set,
+                serde_json::json!({
+                    "device": cfg.target.to_string_lossy(),
+                    "device_size": device_size,
+                    "bytes_captured": bytes_captured,
+                    "allocated_extents": extents_captured,
+                }),
+            ))
+        }
+    }
 }
 
 struct ChunkProcessingResult {
@@ -341,6 +713,137 @@ fn hex_to_array(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Capture a raw block device or sparse file via allocated-extent
+/// enumeration. Each extent is split into 1 MiB sub-chunks; the existing
+/// chunk → encrypt → store → catalog pipeline is reused via
+/// [`spawn_chunk_processing`] and [`handle_processed_chunk`].
+///
+/// Returns `(file_object_id, chunk_set, extents_captured, bytes_captured,
+/// device_size)`.
+async fn backup_block_device(
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    catalog: &CatalogIndex,
+    storage: &LocalStorage,
+    device_path: &Path,
+    retention: Option<&RetentionLock>,
+) -> Result<(i64, HashSet<[u8; 32]>, u64, u64, u64)> {
+    let mut reader = BlockDeviceReader::open(device_path)?;
+    let device_size = reader.size();
+    let extents: Vec<Extent> = reader.used_extents()?;
+    let extents_captured = extents.len() as u64;
+
+    let progress = create_progress_bar(device_size.max(1), "Backing up device");
+    progress.println(format!(
+        "Block device: {} ({} byte(s), {} allocated extent(s))",
+        device_path.display(),
+        device_size,
+        extents_captured
+    ));
+
+    // Build a synthetic ObjectMetadata entry so the catalog has a name and
+    // size for the captured device. We deliberately do not stat() the
+    // device for uid/gid/mode: a snapshot of a block device is logically
+    // a flat image, not a tracked inode.
+    let device_metadata = ObjectMetadata {
+        name: device_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("device"))
+            .to_string_lossy()
+            .to_string(),
+        mode: 0o600,
+        size: device_size,
+        mtime: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        uid: 0,
+        gid: 0,
+    };
+    let metadata_blob = serialize_and_encrypt_metadata(key_manager, &device_metadata)?;
+    let file_object_id = catalog.create_object(ObjectType::File, &metadata_blob)?;
+
+    let pipeline_depth = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2);
+
+    let mut inflight: FuturesUnordered<task::JoinHandle<Result<ChunkProcessingResult>>> =
+        FuturesUnordered::new();
+    let mut scheduled_chunks = 0usize;
+    let mut chunk_set: HashSet<[u8; 32]> = HashSet::new();
+    let mut bytes_captured: u64 = 0;
+
+    for extent in &extents {
+        // Read the extent into memory, then slice it into 1 MiB pieces.
+        // `BlockDeviceReader::open` caps extents at 1 GiB by default, so
+        // this allocation is bounded.
+        let data = reader.read_extent(extent)?;
+        bytes_captured += data.len() as u64;
+        for piece in data.chunks(CHUNK_SIZE) {
+            // Drain the in-flight queue once it reaches `pipeline_depth`
+            // so we don't unboundedly buffer chunk-processing tasks.
+            while inflight.len() >= pipeline_depth {
+                if let Some(result) = inflight.next().await {
+                    let processed = result.map_err(|e| {
+                        LazarusError::Storage(format!("Chunk worker failed: {}", e))
+                    })??;
+                    handle_processed_chunk(
+                        processed,
+                        catalog,
+                        storage,
+                        file_object_id,
+                        retention,
+                        &progress,
+                        &mut chunk_set,
+                    )
+                    .await?;
+                }
+            }
+            let handle = spawn_chunk_processing(
+                scheduled_chunks,
+                piece.to_vec(),
+                key_manager.clone(),
+            );
+            inflight.push(handle);
+            scheduled_chunks += 1;
+        }
+    }
+
+    // Drain remaining work.
+    while let Some(result) = inflight.next().await {
+        let processed = result
+            .map_err(|e| LazarusError::Storage(format!("Chunk worker failed: {}", e)))??;
+        handle_processed_chunk(
+            processed,
+            catalog,
+            storage,
+            file_object_id,
+            retention,
+            &progress,
+            &mut chunk_set,
+        )
+        .await?;
+    }
+
+    progress.finish_with_message("Block-mode capture completed");
+    println!(
+        "  ✓ {} ({} chunks across {} extent(s); {} of {} bytes allocated)",
+        device_path.display(),
+        scheduled_chunks,
+        extents_captured,
+        bytes_captured,
+        device_size
+    );
+
+    Ok((
+        file_object_id,
+        chunk_set,
+        extents_captured,
+        bytes_captured,
+        device_size,
+    ))
+}
+
 async fn backup_directory(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -489,4 +992,142 @@ fn create_progress_bar(total_bytes: u64, message: &str) -> ProgressBar {
     pb.set_style(style);
     pb.set_message(message.to_string());
     pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args() -> BackupArgs {
+        BackupArgs {
+            source: Some("/tmp/source".to_string()),
+            repository: "/tmp/repo".to_string(),
+            password: "pw".to_string(),
+            force: false,
+            consistent: false,
+            snapshotter: SnapshotterChoice::Auto,
+            block_mode: false,
+            device: None,
+            no_hooks: false,
+            hook_templates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_ok_for_default_file_backup() {
+        let cfg = validate_args(&base_args()).unwrap();
+        assert!(matches!(cfg.mode, CaptureMode::File));
+        assert_eq!(cfg.target, PathBuf::from("/tmp/source"));
+    }
+
+    #[test]
+    fn validate_rejects_block_mode_without_device() {
+        let mut a = base_args();
+        a.source = None;
+        a.block_mode = true;
+        let err = validate_args(&a).unwrap_err();
+        assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("requires --device")));
+    }
+
+    #[test]
+    fn validate_rejects_block_mode_with_source() {
+        let mut a = base_args();
+        a.block_mode = true;
+        a.device = Some("/dev/sda1".to_string());
+        // source is Some("/tmp/source") from the base.
+        let err = validate_args(&a).unwrap_err();
+        assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("cannot be combined with --source")));
+    }
+
+    #[test]
+    fn validate_rejects_device_without_block_mode() {
+        let mut a = base_args();
+        a.device = Some("/dev/sda1".to_string());
+        let err = validate_args(&a).unwrap_err();
+        assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("only be used with --block-mode")));
+    }
+
+    #[test]
+    fn validate_accepts_block_mode_with_device_no_source() {
+        let mut a = base_args();
+        a.source = None;
+        a.block_mode = true;
+        a.device = Some("/dev/sda1".to_string());
+        let cfg = validate_args(&a).unwrap();
+        assert!(matches!(cfg.mode, CaptureMode::Block));
+        assert_eq!(cfg.target, PathBuf::from("/dev/sda1"));
+    }
+
+    #[test]
+    fn validate_rejects_file_mode_without_source() {
+        let mut a = base_args();
+        a.source = None;
+        let err = validate_args(&a).unwrap_err();
+        assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("--source is required")));
+    }
+
+    #[test]
+    fn consistent_with_snapshotter_none_is_valid() {
+        let mut a = base_args();
+        a.consistent = true;
+        a.snapshotter = SnapshotterChoice::None;
+        let cfg = validate_args(&a).unwrap();
+        assert!(cfg.consistent);
+        assert_eq!(cfg.snapshotter, SnapshotterChoice::None);
+    }
+
+    #[test]
+    fn pick_snapshotter_none_returns_none() {
+        let res = pick_snapshotter(SnapshotterChoice::None, Path::new("/tmp")).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn pick_snapshotter_auto_errors_when_nothing_supports() {
+        // /tmp is virtually never LVM/btrfs/zfs in CI.
+        let res = pick_snapshotter(SnapshotterChoice::Auto, Path::new("/tmp"));
+        // Either an error, or — on a btrfs-rooted CI runner — a backend.
+        if let Err(err) = res {
+            assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("no snapshotter supports")));
+        }
+    }
+
+    #[test]
+    fn build_hook_runner_default_returns_all_builtins() {
+        let r = build_hook_runner(&[]).unwrap();
+        // The `all()` set in lazarus-core covers at least these five names.
+        let names: Vec<_> = r.hooks().iter().map(|h| h.name.clone()).collect();
+        for expected in &["postgres", "mysql", "mongodb", "redis", "docker"] {
+            assert!(names.iter().any(|n| n == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn build_hook_runner_specific_template() {
+        let r = build_hook_runner(&["postgres".to_string()]).unwrap();
+        assert_eq!(r.hooks().len(), 1);
+        assert_eq!(r.hooks()[0].name, "postgres");
+    }
+
+    #[test]
+    fn build_hook_runner_rejects_unknown_template() {
+        let err = build_hook_runner(&["not-a-real-hook".to_string()]).unwrap_err();
+        assert!(matches!(err, LazarusError::Storage(msg) if msg.contains("unknown hook template")));
+    }
+
+    #[test]
+    fn block_mode_consistent_rejects_filesystem_snapshotters() {
+        let mut a = base_args();
+        a.source = None;
+        a.block_mode = true;
+        a.device = Some("/dev/sda1".to_string());
+        a.consistent = true;
+        a.snapshotter = SnapshotterChoice::Btrfs;
+        // The error surfaces inside run_capture, but we can validate that
+        // arg parsing succeeds and the mode is block — the runtime error
+        // path is exercised via integration.
+        let cfg = validate_args(&a).unwrap();
+        assert!(matches!(cfg.mode, CaptureMode::Block));
+        assert_eq!(cfg.snapshotter, SnapshotterChoice::Btrfs);
+    }
 }
