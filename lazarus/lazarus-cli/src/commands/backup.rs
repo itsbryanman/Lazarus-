@@ -1140,6 +1140,7 @@ fn create_progress_bar(total_bytes: u64, message: &str) -> ProgressBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn base_args() -> BackupArgs {
         BackupArgs {
@@ -1278,5 +1279,80 @@ mod tests {
         let cfg = validate_args(&a).unwrap();
         assert!(matches!(cfg.mode, CaptureMode::Block));
         assert_eq!(cfg.snapshotter, SnapshotterChoice::Btrfs);
+    }
+
+    #[test]
+    fn post_hook_guard_runs_post_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("hook.log");
+        let runner = HookRunner::with_hooks(vec![ApplicationHook {
+            name: "test-hook".to_string(),
+            match_rule: None,
+            pre_snapshot: "true".to_string(),
+            post_snapshot: format!("printf post >> {}", log.display()),
+            timeout_secs: None,
+            env: std::collections::HashMap::new(),
+        }]);
+        let mut report = HookReport::default();
+
+        {
+            let _guard = PostHookGuard::new(Some(&runner), &mut report, true);
+        }
+
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "post");
+        assert_eq!(report.post_failures().len(), 0);
+        assert_eq!(report.outcomes.len(), 1);
+    }
+
+    #[test]
+    fn post_hook_guard_run_now_only_runs_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("hook.log");
+        let runner = HookRunner::with_hooks(vec![ApplicationHook {
+            name: "test-hook".to_string(),
+            match_rule: None,
+            pre_snapshot: "true".to_string(),
+            post_snapshot: format!("printf post >> {}", log.display()),
+            timeout_secs: None,
+            env: std::collections::HashMap::new(),
+        }]);
+        let mut report = HookReport::default();
+
+        {
+            let mut guard = PostHookGuard::new(Some(&runner), &mut report, true);
+            guard.run_now();
+        }
+
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "post");
+        assert_eq!(report.outcomes.len(), 1);
+    }
+
+    struct FakeMount {
+        path: PathBuf,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ConsistentMount for FakeMount {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn release(self: Box<Self>) -> Result<()> {
+            self.events.lock().unwrap().push("release");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn snapshot_guard_releases_mount_on_drop() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mount = FakeMount {
+                path: PathBuf::from("/tmp/snapshot"),
+                events: events.clone(),
+            };
+            let _guard = SnapshotGuard::new(Some(Box::new(mount)));
+        }
+        assert_eq!(*events.lock().unwrap(), vec!["release"]);
     }
 }
