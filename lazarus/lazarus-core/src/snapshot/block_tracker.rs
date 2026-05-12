@@ -101,8 +101,11 @@ impl BlockTracker {
             params![key, mtime as i64, size as i64],
         )
         .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        tx.execute("DELETE FROM FileChunks WHERE path = ?1", params![key])
-            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM FileChunks WHERE path = ?1",
+            params![key],
+        )
+        .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         {
             let mut stmt = tx
                 .prepare(
@@ -215,7 +218,9 @@ impl BlockTracker {
 
 fn path_key(path: &Path) -> String {
     // Canonicalize when possible; fall back to the raw path otherwise.
-    let canon: PathBuf = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canon: PathBuf = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
     canon.to_string_lossy().into_owned()
 }
 

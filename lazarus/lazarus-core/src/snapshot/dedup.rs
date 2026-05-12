@@ -224,7 +224,11 @@ impl DedupTable {
 
     /// Add many references in a single transaction. Hot-path optimization for
     /// snapshots with millions of chunks.
-    pub fn add_references_batch(&mut self, snapshot_id: &str, chunks: &[[u8; 32]]) -> Result<()> {
+    pub fn add_references_batch(
+        &mut self,
+        snapshot_id: &str,
+        chunks: &[[u8; 32]],
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction()

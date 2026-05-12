@@ -166,10 +166,7 @@ impl History {
 
     fn last_signature(&self) -> Result<String> {
         let entries = self.entries()?;
-        Ok(entries
-            .last()
-            .map(|e| e.signature.clone())
-            .unwrap_or_default())
+        Ok(entries.last().map(|e| e.signature.clone()).unwrap_or_default())
     }
 }
 
@@ -246,8 +243,7 @@ mod tests {
     fn chain_links_to_previous_signature() {
         let dir = tempfile::tempdir().unwrap();
         let h = History::open(dir.path(), k());
-        h.record(Operation::Init, "host", serde_json::json!({}))
-            .unwrap();
+        h.record(Operation::Init, "host", serde_json::json!({})).unwrap();
         h.record(Operation::Backup, "host", serde_json::json!({}))
             .unwrap();
         let entries = h.entries().unwrap();
@@ -259,8 +255,7 @@ mod tests {
     fn tampering_with_an_entry_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         let h = History::open(dir.path(), k());
-        h.record(Operation::Init, "host", serde_json::json!({}))
-            .unwrap();
+        h.record(Operation::Init, "host", serde_json::json!({})).unwrap();
         h.record(
             Operation::Backup,
             "host",
@@ -287,8 +282,7 @@ mod tests {
     fn deleting_an_entry_breaks_chain() {
         let dir = tempfile::tempdir().unwrap();
         let h = History::open(dir.path(), k());
-        h.record(Operation::Init, "host", serde_json::json!({}))
-            .unwrap();
+        h.record(Operation::Init, "host", serde_json::json!({})).unwrap();
         h.record(Operation::Backup, "host", serde_json::json!({}))
             .unwrap();
         h.record(Operation::Verify, "host", serde_json::json!({}))
