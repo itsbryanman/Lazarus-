@@ -291,7 +291,11 @@ impl SnapshotManager {
 
     /// Record an arbitrary operation in the history log. Used by the CLI
     /// commands that aren't yet fully ported to the manager.
-    pub fn record_history(&self, op: Operation, details: serde_json::Value) -> Result<()> {
+    pub fn record_history(
+        &self,
+        op: Operation,
+        details: serde_json::Value,
+    ) -> Result<()> {
         self.history.record(op, &self.actor, details)?;
         Ok(())
     }
@@ -324,8 +328,16 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("indexes")).unwrap();
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
         let catalog = CatalogIndex::new(dir.path().join("indexes").join("index.db")).unwrap();
-        let storage: Arc<dyn StorageBackend> = Arc::new(LocalStorage::new(dir.path().join("data")));
-        let mgr = SnapshotManager::new(dir.path(), catalog, storage, [1u8; 32], [2u8; 32]).unwrap();
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalStorage::new(dir.path().join("data")));
+        let mgr = SnapshotManager::new(
+            dir.path(),
+            catalog,
+            storage,
+            [1u8; 32],
+            [2u8; 32],
+        )
+        .unwrap();
         (dir, mgr)
     }
 
@@ -338,13 +350,8 @@ mod tests {
             description: Some("smoke test".into()),
             ..Default::default()
         };
-        mgr.finalize_snapshot(
-            &id,
-            &chunks,
-            &meta,
-            Some(SnapshotManager::merkle_root(&chunks)),
-        )
-        .unwrap();
+        mgr.finalize_snapshot(&id, &chunks, &meta, Some(SnapshotManager::merkle_root(&chunks)))
+            .unwrap();
 
         let stats = mgr.dedup().stats().unwrap();
         assert_eq!(stats.referenced_chunks, 3);
@@ -362,7 +369,8 @@ mod tests {
         let (dir, mut mgr) = make_manager();
 
         // Pre-seed the Chunks table so unreferenced_chunks has rows to find.
-        let conn = rusqlite::Connection::open(dir.path().join("indexes").join("index.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("indexes").join("index.db"))
+            .unwrap();
         for i in 0..3u8 {
             let hex: String = [i; 32].iter().map(|b| format!("{:02x}", b)).collect();
             conn.execute(

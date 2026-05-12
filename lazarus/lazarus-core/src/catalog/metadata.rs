@@ -210,7 +210,9 @@ mod tests {
     fn delete_removes_entry() {
         let dir = tempfile::tempdir().unwrap();
         let store = MetadataStore::open(dir.path(), k());
-        store.put("s", &SnapshotMetadata::default()).unwrap();
+        store
+            .put("s", &SnapshotMetadata::default())
+            .unwrap();
         store.delete("s").unwrap();
         assert!(store.get("s").unwrap().is_none());
     }
@@ -219,7 +221,9 @@ mod tests {
     fn wrong_key_fails() {
         let dir = tempfile::tempdir().unwrap();
         let store = MetadataStore::open(dir.path(), k());
-        store.put("s", &SnapshotMetadata::default()).unwrap();
+        store
+            .put("s", &SnapshotMetadata::default())
+            .unwrap();
         let attacker = MetadataStore::open(dir.path(), [0u8; 32]);
         assert!(attacker.get("s").is_err());
     }
