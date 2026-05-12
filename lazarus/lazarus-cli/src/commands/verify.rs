@@ -1,5 +1,7 @@
+use super::snapshot_utils::decrypt_object_metadata;
 use clap::Args;
 use lazarus_core::catalog::index::CatalogIndex;
+use lazarus_core::catalog::index::ObjectType;
 use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::Result;
@@ -39,6 +41,7 @@ pub async fn verify(args: &VerifyArgs) -> Result<()> {
     let mut missing_chunks = 0;
     let mut corrupted_chunks = 0;
     let mut verified_chunks = 0;
+    let mut manifest_errors = 0;
 
     for (idx, hash) in chunk_hashes.iter().enumerate() {
         if (idx + 1) % 100 == 0 || idx == 0 {
@@ -108,20 +111,107 @@ pub async fn verify(args: &VerifyArgs) -> Result<()> {
         verified_chunks += 1;
     }
 
+    for (snapshot_id, _) in catalog.list_snapshots()? {
+        if let Some((root_object_id, _)) = catalog.get_snapshot(&snapshot_id)? {
+            let mut visited = std::collections::HashSet::new();
+            manifest_errors += verify_block_manifests(
+                &catalog,
+                &key_manager,
+                root_object_id,
+                &mut visited,
+                &snapshot_id,
+            )?;
+        }
+    }
+
     println!("\n\nVerification complete:");
     println!("  Total chunks:     {}", total_chunks);
     println!("  Verified:         {}", verified_chunks);
     println!("  Missing:          {}", missing_chunks);
     println!("  Corrupted:        {}", corrupted_chunks);
+    println!("  Manifest errors:  {}", manifest_errors);
 
-    if missing_chunks > 0 || corrupted_chunks > 0 {
+    if missing_chunks > 0 || corrupted_chunks > 0 || manifest_errors > 0 {
         println!("\n❌ Repository has integrity issues!");
         return Err(lazarus_core::error::LazarusError::VerificationFailed(
-            format!("{} missing, {} corrupted", missing_chunks, corrupted_chunks),
+            format!(
+                "{} missing, {} corrupted, {} manifest errors",
+                missing_chunks, corrupted_chunks, manifest_errors
+            ),
         ));
     } else {
         println!("\n✓ Repository integrity verified successfully!");
     }
 
     Ok(())
+}
+
+fn verify_block_manifests(
+    catalog: &CatalogIndex,
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    object_id: i64,
+    visited: &mut std::collections::HashSet<i64>,
+    snapshot_id: &str,
+) -> Result<usize> {
+    if !visited.insert(object_id) {
+        return Ok(0);
+    }
+
+    let Some((obj_type, metadata_blob)) = catalog.get_object(object_id)? else {
+        return Ok(0);
+    };
+
+    match obj_type {
+        ObjectType::File => Ok(0),
+        ObjectType::Directory => {
+            let mut errors = 0;
+            for (child_id, _) in catalog.get_tree_children(object_id)? {
+                errors +=
+                    verify_block_manifests(catalog, key_manager, child_id, visited, snapshot_id)?;
+            }
+            Ok(errors)
+        }
+        ObjectType::BlockDevice => {
+            let metadata = decrypt_object_metadata(key_manager, &metadata_blob)?;
+            let layout = catalog.get_block_layout(object_id)?;
+            let mut errors = 0;
+            let mut allocated_total = 0u64;
+            let mut last_extent_end = 0u64;
+            for extent in &layout.extents {
+                if extent.offset < last_extent_end {
+                    println!(
+                        "\n  ERROR: Snapshot {} block object {} has out-of-order extents",
+                        snapshot_id, object_id
+                    );
+                    errors += 1;
+                }
+                let extent_end = extent.offset.saturating_add(extent.length);
+                if extent_end > metadata.size {
+                    println!(
+                        "\n  ERROR: Snapshot {} block object {} extent {} exceeds device size",
+                        snapshot_id, object_id, extent.extent_idx
+                    );
+                    errors += 1;
+                }
+                let chunk_total: u64 = extent.chunks.iter().map(|chunk| chunk.length).sum();
+                if chunk_total != extent.length {
+                    println!(
+                        "\n  ERROR: Snapshot {} block object {} extent {} length mismatch",
+                        snapshot_id, object_id, extent.extent_idx
+                    );
+                    errors += 1;
+                }
+                allocated_total = allocated_total.saturating_add(extent.length);
+                last_extent_end = extent_end;
+            }
+            if allocated_total > metadata.size {
+                println!(
+                    "\n  ERROR: Snapshot {} block object {} allocated bytes exceed device size",
+                    snapshot_id, object_id
+                );
+                errors += 1;
+            }
+            Ok(errors)
+        }
+    }
 }

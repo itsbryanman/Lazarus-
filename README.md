@@ -44,6 +44,54 @@ cargo build --release
 ```
 
 ```bash
+# Consistent file backup. With the default snapshotter selection, application
+# hooks run only around OS snapshot creation: pre hook → snapshot → post hook →
+# capture from snapshot → release snapshot.
+./target/release/lazarus-cli backup \
+  --source /srv/data \
+  --repository /srv/lazarus/repo \
+  --password 'UltraSecret!' \
+  --consistent
+```
+
+```bash
+# Hooks-only consistency. No OS snapshot is taken, so pre/post hooks bracket
+# the full capture and may hold database locks or paused containers until the
+# backup completes.
+./target/release/lazarus-cli backup \
+  --source /srv/data \
+  --repository /srv/lazarus/repo \
+  --password 'UltraSecret!' \
+  --consistent \
+  --snapshotter none
+```
+
+```bash
+# Block-mode backup and sparse-file restore. Block snapshots record allocated
+# extents and chunk offsets so restore can preserve sparse holes.
+./target/release/lazarus-cli backup \
+  --block-mode \
+  --device /dev/vg0/root-snap \
+  --repository /srv/lazarus/repo \
+  --password 'UltraSecret!'
+
+./target/release/lazarus-cli restore \
+  --snapshot 2026-05-12T11:23:08 \
+  --destination /tmp/root.img \
+  --repository /srv/lazarus/repo \
+  --password 'UltraSecret!' \
+  --verify
+
+# To restore to an existing raw device instead, use --device. Lazarus refuses
+# targets smaller than the recorded device size.
+./target/release/lazarus-cli restore \
+  --snapshot 2026-05-12T11:23:08 \
+  --device /dev/vg0/root-restore \
+  --repository /srv/lazarus/repo \
+  --password 'UltraSecret!'
+```
+
+```bash
 # Rotate the master key when credentials change
 ./target/release/lazarus-cli security rotate-key \
   --repository /srv/lazarus/repo

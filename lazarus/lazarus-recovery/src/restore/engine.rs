@@ -42,6 +42,9 @@ pub fn restore_snapshot(
     let args = RestoreArgs {
         snapshot: Some(snapshot_id.to_string()),
         destination: Some(destination.to_string()),
+        device: None,
+        allow_overwrite: false,
+        verify: false,
         repository: repo_path.to_string(),
         password: password.to_string(),
     };

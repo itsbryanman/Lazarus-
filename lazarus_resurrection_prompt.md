@@ -270,6 +270,25 @@ Use `FS_IOC_FIEMAP` to enumerate only allocated extents — never back up holes 
 
 **Acceptance:** Block-mode backup of a 100GB partition with 10GB used produces a repo no larger than 11GB after compression.
 
+### 2.6 Restore correctness and block-mode restore
+
+Snapshot-backed file backups must run application hooks only around point-in-time
+snapshot creation: pre hook, create snapshot/consistent mount, post hook, capture
+from the snapshot mount, release the snapshot. Snapshot release is best-effort and
+must still run if capture fails. If snapshot creation fails after pre hooks ran,
+post hooks still run so applications are thawed/unlocked.
+
+When `--consistent --snapshotter none` is used, there is no OS snapshot. Hooks
+therefore bracket the actual capture: pre hook, capture from the original source,
+post hook. Operators should expect database locks or paused containers to last for
+the full backup duration in this mode.
+
+Block-mode backups store a typed extent manifest: original device size, allocated
+extent offsets/lengths, and ordered chunk hashes with offsets relative to each
+extent. Restore can recreate either a sparse image at `--destination` or write to
+an existing raw target via `--device`; holes between allocated extents are left
+sparse/zero-filled rather than written as data.
+
 ---
 
 ## Phase 3 — Bare-metal capture
