@@ -24,7 +24,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const METADATA_FILE: &str = "snapshot_metadata.json";
-const METADATA_VERSION: u32 = 1;
+/// Latest on-disk version this build writes.
+const METADATA_VERSION_CURRENT: u32 = 2;
+/// Oldest on-disk version this build will load before rewriting as
+/// `METADATA_VERSION_CURRENT`.
+const METADATA_VERSION_MIN_SUPPORTED: u32 = 1;
 
 /// Operator-supplied metadata for a snapshot. Free-form fields are kept
 /// optional so older clients reading newer files behave well.
@@ -46,6 +50,13 @@ pub struct SnapshotMetadata {
     /// Hostname that took the snapshot.
     #[serde(default)]
     pub hostname: Option<String>,
+    /// Hex BLAKE3 of the encrypted SystemFingerprint chunk for this snapshot,
+    /// if a bare-metal fingerprint was captured alongside the file/block data.
+    #[serde(default)]
+    pub system_fingerprint_chunk: Option<String>,
+    /// Schema version of the fingerprint payload (currently always `1`).
+    #[serde(default)]
+    pub system_fingerprint_format_version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -79,24 +90,29 @@ impl MetadataStore {
     fn load(&self) -> Result<StoreFile> {
         if !self.path.exists() {
             return Ok(StoreFile {
-                version: METADATA_VERSION,
+                version: METADATA_VERSION_CURRENT,
                 entries: BTreeMap::new(),
             });
         }
         let raw = fs::read_to_string(&self.path)?;
-        let sf: StoreFile = serde_json::from_str(&raw)
+        let mut sf: StoreFile = serde_json::from_str(&raw)
             .map_err(|e| LazarusError::SerializationError(e.to_string()))?;
-        if sf.version != METADATA_VERSION {
+        if sf.version < METADATA_VERSION_MIN_SUPPORTED || sf.version > METADATA_VERSION_CURRENT {
             return Err(LazarusError::Storage(format!(
-                "Unsupported metadata file version: {}",
-                sf.version
+                "Unsupported metadata file version: {} (this build supports {}..={})",
+                sf.version, METADATA_VERSION_MIN_SUPPORTED, METADATA_VERSION_CURRENT
             )));
         }
+        // Older files are upgraded in-memory; the next `save` rewrites them
+        // as `METADATA_VERSION_CURRENT`.
+        sf.version = METADATA_VERSION_CURRENT;
         Ok(sf)
     }
 
     fn save(&self, sf: &StoreFile) -> Result<()> {
-        let json = serde_json::to_string_pretty(sf)
+        let mut to_write = sf.clone();
+        to_write.version = METADATA_VERSION_CURRENT;
+        let json = serde_json::to_string_pretty(&to_write)
             .map_err(|e| LazarusError::SerializationError(e.to_string()))?;
         let tmp = self.path.with_extension("tmp");
         fs::write(&tmp, json)?;
@@ -193,10 +209,79 @@ mod tests {
             retention_days: Some(60),
             source: Some("/var/lib/postgresql".into()),
             hostname: Some("db-1".into()),
+            system_fingerprint_chunk: None,
+            system_fingerprint_format_version: None,
         };
         store.put("snap-1", &meta).unwrap();
         let got = store.get("snap-1").unwrap().unwrap();
         assert_eq!(got, meta);
+    }
+
+    #[test]
+    fn v1_file_loads_and_rewrites_as_v2() {
+        // Hand-roll a v1 file: same JSON shape as v1 (version: 1, entries
+        // map). The encrypted ciphertext inside still decrypts to a
+        // `SnapshotMetadata` value missing the v2 fields, which serde
+        // should default to `None`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = MetadataStore::open(dir.path(), k());
+
+        // Use a private helper path: write a v1 store via the store_file
+        // representation while pretending it's version 1.
+        // We assemble it by calling `put` to construct the encrypted entry
+        // and then rewriting the version number on disk.
+        store
+            .put(
+                "snap-old",
+                &SnapshotMetadata {
+                    tags: vec!["legacy".into()],
+                    description: Some("v1 file".into()),
+                    retention_days: None,
+                    source: Some("/var/data".into()),
+                    hostname: Some("legacy-host".into()),
+                    system_fingerprint_chunk: None,
+                    system_fingerprint_format_version: None,
+                },
+            )
+            .unwrap();
+        let path = dir.path().join("snapshot_metadata.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v2_marker = format!("\"version\": {}", super::METADATA_VERSION_CURRENT);
+        assert!(raw.contains(&v2_marker));
+        let downgraded = raw.replace(&v2_marker, "\"version\": 1");
+        std::fs::write(&path, downgraded).unwrap();
+
+        let got = store.get("snap-old").unwrap().unwrap();
+        assert_eq!(got.hostname.as_deref(), Some("legacy-host"));
+        assert!(got.system_fingerprint_chunk.is_none());
+        assert!(got.system_fingerprint_format_version.is_none());
+
+        // Writing rewrites as v2.
+        store
+            .put(
+                "snap-new",
+                &SnapshotMetadata {
+                    system_fingerprint_chunk: Some("abc".into()),
+                    system_fingerprint_format_version: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(&v2_marker));
+    }
+
+    #[test]
+    fn unsupported_future_version_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MetadataStore::open(dir.path(), k());
+        store.put("s", &SnapshotMetadata::default()).unwrap();
+        let path = dir.path().join("snapshot_metadata.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v2_marker = format!("\"version\": {}", super::METADATA_VERSION_CURRENT);
+        let upgraded = raw.replace(&v2_marker, "\"version\": 9999");
+        std::fs::write(&path, upgraded).unwrap();
+        assert!(store.get("s").is_err());
     }
 
     #[test]

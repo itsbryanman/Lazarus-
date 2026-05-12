@@ -186,6 +186,12 @@ fn mark_object_chunks(
                 mark_object_chunks(catalog, child_id, visited_objects, active_chunks)?;
             }
         }
+        ObjectType::SystemFingerprint => {
+            // SystemFingerprint chunks are referenced via the
+            // DedupTable directly at capture time (see
+            // FingerprintPersister); there are no per-object chunk
+            // rows to mark from the catalog side.
+        }
     }
 
     Ok(())

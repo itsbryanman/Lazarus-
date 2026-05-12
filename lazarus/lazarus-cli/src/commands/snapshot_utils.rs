@@ -95,6 +95,11 @@ fn accumulate_snapshot_size(
 
     match obj_type {
         ObjectType::File | ObjectType::BlockDevice => Ok(metadata.size),
+        // SystemFingerprint objects are not file-tree children; their
+        // payload is referenced through the snapshot metadata, not the
+        // tree, so they don't contribute to the user-visible "size of a
+        // file backup". Treat them as zero.
+        ObjectType::SystemFingerprint => Ok(0),
         ObjectType::Directory => {
             let mut total = 0;
             for (child_id, _) in catalog.get_tree_children(object_id)? {
