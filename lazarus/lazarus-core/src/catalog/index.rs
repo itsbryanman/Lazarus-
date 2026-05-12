@@ -9,6 +9,7 @@ pub enum ObjectType {
     File = 0,
     Directory = 1,
     BlockDevice = 2,
+    SystemFingerprint = 3,
 }
 
 /// Metadata for a file or directory object
@@ -316,7 +317,14 @@ impl CatalogIndex {
                     0 => ObjectType::File,
                     1 => ObjectType::Directory,
                     2 => ObjectType::BlockDevice,
-                    _ => ObjectType::File, // Default
+                    3 => ObjectType::SystemFingerprint,
+                    other => {
+                        eprintln!(
+                            "warning: unknown ObjectType integer {}; defaulting to File",
+                            other
+                        );
+                        ObjectType::File
+                    }
                 };
                 Ok((obj_type, row.get::<_, Vec<u8>>(1)?))
             },
