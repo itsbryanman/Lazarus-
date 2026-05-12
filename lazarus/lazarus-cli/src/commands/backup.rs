@@ -705,7 +705,7 @@ async fn backup_file(
     let metadata_blob = serialize_and_encrypt_metadata(key_manager, &file_metadata)?;
 
     // Create object for file
-    let file_object_id = catalog.create_object(ObjectType::BlockDevice, &metadata_blob)?;
+    let file_object_id = catalog.create_object(ObjectType::File, &metadata_blob)?;
 
     let file = tokio::fs::File::open(file_path).await?;
     let reader = BufReader::new(file);
@@ -888,7 +888,7 @@ async fn backup_block_device(
         gid: 0,
     };
     let metadata_blob = serialize_and_encrypt_metadata(key_manager, &device_metadata)?;
-    let file_object_id = catalog.create_object(ObjectType::File, &metadata_blob)?;
+    let file_object_id = catalog.create_object(ObjectType::BlockDevice, &metadata_blob)?;
 
     let pipeline_depth = std::thread::available_parallelism()
         .map(|n| n.get())
