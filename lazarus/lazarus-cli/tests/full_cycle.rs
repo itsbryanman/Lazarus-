@@ -61,6 +61,9 @@ async fn full_cycle_backup_and_restore_matches_hashes() {
     let restore_args = RestoreArgs {
         snapshot: Some(latest_snapshot.clone()),
         destination: Some(restore_path.to_string_lossy().to_string()),
+        device: None,
+        allow_overwrite: false,
+        verify: false,
         repository: repo_path.to_string_lossy().to_string(),
         password: PASSWORD.to_string(),
     };
