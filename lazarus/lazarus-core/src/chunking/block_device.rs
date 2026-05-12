@@ -302,10 +302,34 @@ mod tests {
         }];
         let split = split_extents(big, 3);
         assert_eq!(split.len(), 4);
-        assert_eq!(split[0], Extent { offset: 0, length: 3 });
-        assert_eq!(split[1], Extent { offset: 3, length: 3 });
-        assert_eq!(split[2], Extent { offset: 6, length: 3 });
-        assert_eq!(split[3], Extent { offset: 9, length: 1 });
+        assert_eq!(
+            split[0],
+            Extent {
+                offset: 0,
+                length: 3
+            }
+        );
+        assert_eq!(
+            split[1],
+            Extent {
+                offset: 3,
+                length: 3
+            }
+        );
+        assert_eq!(
+            split[2],
+            Extent {
+                offset: 6,
+                length: 3
+            }
+        );
+        assert_eq!(
+            split[3],
+            Extent {
+                offset: 9,
+                length: 1
+            }
+        );
     }
 
     #[test]
@@ -351,12 +375,13 @@ mod tests {
         let p = dir.path().join("img.bin");
         write_file(&p, &vec![0u8; 64]);
         let mut r = BlockDeviceReader::open(&p).unwrap();
-        assert!(r
-            .read_extent(&Extent {
+        assert!(
+            r.read_extent(&Extent {
                 offset: 0,
                 length: 128
             })
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]

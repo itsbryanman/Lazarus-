@@ -248,7 +248,10 @@ mod tests {
         let enc = StreamingEncryptor::new(&key());
         let ch = blake3::hash(b"x").into();
         let ct = enc.encrypt_chunk(&ch, b"x").unwrap();
-        assert_eq!(StreamingEncryptor::detect_framing(&ct), ChunkFraming::Streaming);
+        assert_eq!(
+            StreamingEncryptor::detect_framing(&ct),
+            ChunkFraming::Streaming
+        );
 
         // A 12-byte nonce-led blob is treated as legacy.
         let legacy = vec![0u8; 32];

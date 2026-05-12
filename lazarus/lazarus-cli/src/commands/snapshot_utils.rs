@@ -37,6 +37,23 @@ pub fn parse_snapshot_metadata(
     serde_json::from_str(&json).ok()
 }
 
+pub fn parse_snapshot_metadata_value(
+    key_manager: &KeyManager,
+    blob: &[u8],
+) -> Option<serde_json::Value> {
+    if blob.is_empty() {
+        return None;
+    }
+
+    if blob.len() < 12 {
+        return serde_json::from_slice(blob).ok();
+    }
+
+    let (nonce, encrypted) = blob.split_at(12);
+    let json = key_manager.decrypt_metadata(encrypted, nonce).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 pub fn decrypt_object_metadata(key_manager: &KeyManager, blob: &[u8]) -> Result<ObjectMetadata> {
     if blob.len() < 12 {
         let fallback = String::from_utf8(blob.to_vec())
@@ -77,7 +94,7 @@ fn accumulate_snapshot_size(
     let metadata = decrypt_object_metadata(key_manager, &metadata_blob)?;
 
     match obj_type {
-        ObjectType::File => Ok(metadata.size),
+        ObjectType::File | ObjectType::BlockDevice => Ok(metadata.size),
         ObjectType::Directory => {
             let mut total = 0;
             for (child_id, _) in catalog.get_tree_children(object_id)? {

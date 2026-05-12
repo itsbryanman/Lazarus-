@@ -362,7 +362,7 @@ impl Agent {
         let root_metadata = decrypt_object_metadata(&key_manager, &root_metadata_blob)?;
 
         match root_type {
-            ObjectType::File => {
+            ObjectType::File | ObjectType::BlockDevice => {
                 restore_file(
                     &key_manager,
                     &catalog,
@@ -903,7 +903,7 @@ fn estimate_restore_metrics_inner(
     let metadata = decrypt_object_metadata(key_manager, &metadata_blob)?;
 
     match obj_type {
-        ObjectType::File => Ok((1, metadata.size)),
+        ObjectType::File | ObjectType::BlockDevice => Ok((1, metadata.size)),
         ObjectType::Directory => {
             let mut files = 0;
             let mut bytes = 0;
@@ -1044,7 +1044,7 @@ async fn restore_directory(
         let child_path = dest_path.join(child_name);
 
         match child_type {
-            ObjectType::File => {
+            ObjectType::File | ObjectType::BlockDevice => {
                 restore_file(
                     key_manager,
                     catalog,
@@ -1189,6 +1189,13 @@ fn mark_object_chunks(
         ObjectType::File => {
             for chunk_hash in catalog.get_file_chunks(object_id)? {
                 active_chunks.insert(chunk_hash);
+            }
+        }
+        ObjectType::BlockDevice => {
+            for extent in catalog.get_block_layout(object_id)?.extents {
+                for chunk in extent.chunks {
+                    active_chunks.insert(chunk.hash);
+                }
             }
         }
         ObjectType::Directory => {

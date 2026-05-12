@@ -174,6 +174,13 @@ fn mark_object_chunks(
                 active_chunks.insert(chunk_hash);
             }
         }
+        ObjectType::BlockDevice => {
+            for extent in catalog.get_block_layout(object_id)?.extents {
+                for chunk in extent.chunks {
+                    active_chunks.insert(chunk.hash);
+                }
+            }
+        }
         ObjectType::Directory => {
             for (child_id, _) in catalog.get_tree_children(object_id)? {
                 mark_object_chunks(catalog, child_id, visited_objects, active_chunks)?;

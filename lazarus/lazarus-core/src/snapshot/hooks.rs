@@ -334,12 +334,7 @@ pub mod builtins {
 
     /// Redis: SAVE forces a synchronous RDB write. Post is a no-op.
     pub fn redis() -> ApplicationHook {
-        hook(
-            "redis",
-            "redis-server",
-            "redis-cli SAVE",
-            "true",
-        )
+        hook("redis", "redis-server", "redis-cli SAVE", "true")
     }
 
     /// libvirt: fsfreeze the guest filesystem via the QEMU guest agent.
