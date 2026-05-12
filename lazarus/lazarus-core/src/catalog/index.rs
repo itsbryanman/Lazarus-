@@ -8,6 +8,7 @@ use std::path::Path;
 pub enum ObjectType {
     File = 0,
     Directory = 1,
+    BlockDevice = 2,
 }
 
 /// Metadata for a file or directory object
@@ -28,6 +29,28 @@ pub struct ObjectMetadata {
 /// Catalog database for managing backups
 pub struct CatalogIndex {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockExtentChunk {
+    pub chunk_idx: u64,
+    pub hash: String,
+    pub rel_offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockExtent {
+    pub extent_idx: u64,
+    pub offset: u64,
+    pub length: u64,
+    pub chunks: Vec<BlockExtentChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockLayout {
+    pub object_id: i64,
+    pub extents: Vec<BlockExtent>,
 }
 
 impl CatalogIndex {
@@ -85,6 +108,27 @@ impl CatalogIndex {
                 FOREIGN KEY (chunk_hash) REFERENCES Chunks(hash)
             );
 
+            CREATE TABLE IF NOT EXISTS BlockExtents (
+                object_id INTEGER NOT NULL,
+                extent_idx INTEGER NOT NULL,
+                extent_offset INTEGER NOT NULL,
+                extent_len INTEGER NOT NULL,
+                PRIMARY KEY (object_id, extent_idx),
+                FOREIGN KEY (object_id) REFERENCES Objects(object_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS BlockExtentChunks (
+                object_id INTEGER NOT NULL,
+                extent_idx INTEGER NOT NULL,
+                chunk_idx INTEGER NOT NULL,
+                chunk_hash TEXT NOT NULL,
+                rel_offset INTEGER NOT NULL,
+                chunk_len INTEGER NOT NULL,
+                PRIMARY KEY (object_id, extent_idx, chunk_idx),
+                FOREIGN KEY (object_id, extent_idx) REFERENCES BlockExtents(object_id, extent_idx),
+                FOREIGN KEY (chunk_hash) REFERENCES Chunks(hash)
+            );
+
             CREATE TABLE IF NOT EXISTS Snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 timestamp INTEGER NOT NULL,
@@ -95,8 +139,16 @@ impl CatalogIndex {
 
             CREATE INDEX IF NOT EXISTS idx_chunks_hash ON Chunks(hash);
             CREATE INDEX IF NOT EXISTS idx_filechunks_file ON FileChunks(file_object_id);
+            CREATE INDEX IF NOT EXISTS idx_block_extents_object ON BlockExtents(object_id);
+            CREATE INDEX IF NOT EXISTS idx_block_extent_chunks_object ON BlockExtentChunks(object_id);
+            CREATE INDEX IF NOT EXISTS idx_block_extent_chunks_hash ON BlockExtentChunks(chunk_hash);
             CREATE INDEX IF NOT EXISTS idx_tree_parent ON Tree(parent_object_id);
             CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON Snapshots(timestamp);
+
+            CREATE TABLE IF NOT EXISTS CatalogSchemaVersion (
+                version INTEGER PRIMARY KEY
+            );
+            INSERT OR IGNORE INTO CatalogSchemaVersion(version) VALUES (2);
             "#,
             )
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
@@ -166,6 +218,43 @@ impl CatalogIndex {
         Ok(())
     }
 
+    pub fn add_block_extent(
+        &self,
+        object_id: i64,
+        extent_idx: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO BlockExtents (object_id, extent_idx, extent_offset, extent_len) VALUES (?1, ?2, ?3, ?4)",
+            params![object_id, extent_idx as i64, offset as i64, length as i64],
+        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn add_block_extent_chunk(
+        &self,
+        object_id: i64,
+        extent_idx: u64,
+        chunk_idx: u64,
+        chunk_hash: &str,
+        rel_offset: u64,
+        length: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO BlockExtentChunks (object_id, extent_idx, chunk_idx, chunk_hash, rel_offset, chunk_len) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                object_id,
+                extent_idx as i64,
+                chunk_idx as i64,
+                chunk_hash,
+                rel_offset as i64,
+                length as i64
+            ],
+        ).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
     /// Create a new snapshot
     pub fn create_snapshot(
         &self,
@@ -226,6 +315,7 @@ impl CatalogIndex {
                 let obj_type = match row.get::<_, i32>(0)? {
                     0 => ObjectType::File,
                     1 => ObjectType::Directory,
+                    2 => ObjectType::BlockDevice,
                     _ => ObjectType::File, // Default
                 };
                 Ok((obj_type, row.get::<_, Vec<u8>>(1)?))
@@ -281,6 +371,87 @@ impl CatalogIndex {
         Ok(result)
     }
 
+    pub fn get_block_extents(&self, object_id: i64) -> Result<Vec<(u64, u64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT extent_idx, extent_offset, extent_len FROM BlockExtents WHERE object_id = ?1 ORDER BY extent_idx",
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        let extents = stmt
+            .query_map(params![object_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for extent in extents {
+            result.push(extent.map_err(|e| LazarusError::DatabaseError(e.to_string()))?);
+        }
+
+        Ok(result)
+    }
+
+    pub fn get_block_extent_chunks(
+        &self,
+        object_id: i64,
+        extent_idx: u64,
+    ) -> Result<Vec<(u64, String, u64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT chunk_idx, chunk_hash, rel_offset, chunk_len FROM BlockExtentChunks WHERE object_id = ?1 AND extent_idx = ?2 ORDER BY chunk_idx",
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        let chunks = stmt
+            .query_map(params![object_id, extent_idx as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for chunk in chunks {
+            result.push(chunk.map_err(|e| LazarusError::DatabaseError(e.to_string()))?);
+        }
+
+        Ok(result)
+    }
+
+    pub fn get_block_layout(&self, object_id: i64) -> Result<BlockLayout> {
+        let mut extents = Vec::new();
+        for (extent_idx, offset, length) in self.get_block_extents(object_id)? {
+            let chunks = self
+                .get_block_extent_chunks(object_id, extent_idx)?
+                .into_iter()
+                .map(|(chunk_idx, hash, rel_offset, length)| BlockExtentChunk {
+                    chunk_idx,
+                    hash,
+                    rel_offset,
+                    length,
+                })
+                .collect();
+            extents.push(BlockExtent {
+                extent_idx,
+                offset,
+                length,
+                chunks,
+            });
+        }
+
+        Ok(BlockLayout { object_id, extents })
+    }
+
     /// Get total storage statistics
     pub fn get_stats(&self) -> Result<(usize, usize, usize)> {
         let chunk_count: i64 = self
@@ -327,6 +498,12 @@ impl CatalogIndex {
         self.conn
             .execute(
                 "DELETE FROM FileChunks WHERE chunk_hash = ?1",
+                params![hash],
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        self.conn
+            .execute(
+                "DELETE FROM BlockExtentChunks WHERE chunk_hash = ?1",
                 params![hash],
             )
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
@@ -446,6 +623,41 @@ mod tests {
         assert_eq!(chunks[0], "chunk1");
         assert_eq!(chunks[1], "chunk2");
         assert_eq!(chunks[2], "chunk3");
+    }
+
+    #[test]
+    fn test_block_extent_manifest_round_trip() {
+        let (_dir, catalog) = create_test_catalog();
+        catalog.upsert_chunk("chunk1", 100, 200).unwrap();
+        catalog.upsert_chunk("chunk2", 150, 250).unwrap();
+
+        let object_id = catalog
+            .create_object(ObjectType::BlockDevice, b"block")
+            .unwrap();
+        catalog.add_block_extent(object_id, 0, 4096, 450).unwrap();
+        catalog
+            .add_block_extent_chunk(object_id, 0, 0, "chunk1", 0, 200)
+            .unwrap();
+        catalog
+            .add_block_extent_chunk(object_id, 0, 1, "chunk2", 200, 250)
+            .unwrap();
+
+        let extents = catalog.get_block_extents(object_id).unwrap();
+        assert_eq!(extents, vec![(0, 4096, 450)]);
+
+        let chunks = catalog.get_block_extent_chunks(object_id, 0).unwrap();
+        assert_eq!(
+            chunks,
+            vec![
+                (0, "chunk1".to_string(), 0, 200),
+                (1, "chunk2".to_string(), 200, 250)
+            ]
+        );
+
+        let layout = catalog.get_block_layout(object_id).unwrap();
+        assert_eq!(layout.extents.len(), 1);
+        assert_eq!(layout.extents[0].offset, 4096);
+        assert_eq!(layout.extents[0].chunks.len(), 2);
     }
 
     #[test]

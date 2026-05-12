@@ -33,8 +33,12 @@ fn dedup_round_trip_two_snapshots() {
 
     let mut dedup = DedupTable::open(&db).unwrap();
 
-    dedup.add_references_batch("snap-a", &[h(1), h(2), h(3)]).unwrap();
-    dedup.add_references_batch("snap-b", &[h(2), h(3), h(4)]).unwrap();
+    dedup
+        .add_references_batch("snap-a", &[h(1), h(2), h(3)])
+        .unwrap();
+    dedup
+        .add_references_batch("snap-b", &[h(2), h(3), h(4)])
+        .unwrap();
 
     assert_eq!(dedup.refcount(&h(1)).unwrap(), 1);
     assert_eq!(dedup.refcount(&h(2)).unwrap(), 2);

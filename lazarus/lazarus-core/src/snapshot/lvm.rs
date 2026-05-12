@@ -307,7 +307,9 @@ fn path_is_lvm_volume(path: &Path) -> Option<bool> {
         let vg = parts.next();
         let lv = parts.next();
         let extra = parts.next();
-        return Some(matches!((vg, lv, extra), (Some(v), Some(l), None) if !v.is_empty() && !l.is_empty()));
+        return Some(
+            matches!((vg, lv, extra), (Some(v), Some(l), None) if !v.is_empty() && !l.is_empty()),
+        );
     }
     Some(false)
 }
