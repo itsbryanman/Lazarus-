@@ -171,6 +171,13 @@ pub async fn restore(args: &RestoreArgs) -> Result<()> {
                     .await?;
             }
         }
+        ObjectType::SystemFingerprint => {
+            return Err(LazarusError::Storage(
+                "this snapshot's root object is a SystemFingerprint; \
+                 use `lazarus-cli system-snapshot --show` to inspect it"
+                    .into(),
+            ));
+        }
     }
 
     progress.finish_with_message("Restore completed successfully");
@@ -308,6 +315,12 @@ async fn restore_directory(
             ObjectType::BlockDevice => {
                 return Err(LazarusError::Storage(
                     "nested block-device objects are not supported in file-tree restore"
+                        .to_string(),
+                ));
+            }
+            ObjectType::SystemFingerprint => {
+                return Err(LazarusError::Storage(
+                    "nested SystemFingerprint objects are not supported in file-tree restore"
                         .to_string(),
                 ));
             }

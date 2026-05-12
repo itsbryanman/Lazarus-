@@ -163,6 +163,8 @@ fn verify_block_manifests(
 
     match obj_type {
         ObjectType::File => Ok(0),
+        // SystemFingerprint payloads carry no block-manifest data.
+        ObjectType::SystemFingerprint => Ok(0),
         ObjectType::Directory => {
             let mut errors = 0;
             for (child_id, _) in catalog.get_tree_children(object_id)? {

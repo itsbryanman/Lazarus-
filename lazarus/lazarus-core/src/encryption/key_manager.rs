@@ -220,8 +220,10 @@ impl KeyManager {
         Ok(decrypted)
     }
 
-    /// Encrypt metadata with the metadata key
-    pub fn encrypt_metadata(&self, metadata: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    /// Encrypt arbitrary bytes with the metadata key. Unlike
+    /// [`encrypt_metadata`], the input is not required to be UTF-8, so this
+    /// is safe for bincode payloads, signed integers, etc.
+    pub fn encrypt_metadata_bytes(&self, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit};
         use rand::RngCore;
@@ -232,24 +234,34 @@ impl KeyManager {
         rand::thread_rng().fill_bytes(&mut nonce);
 
         let encrypted = cipher
-            .encrypt(GenericArray::from_slice(&nonce), metadata.as_bytes())
+            .encrypt(GenericArray::from_slice(&nonce), data)
             .map_err(|_| LazarusError::EncryptionError("Failed to encrypt metadata".into()))?;
 
         Ok((encrypted, nonce.to_vec()))
     }
 
-    /// Decrypt metadata with the metadata key
-    pub fn decrypt_metadata(&self, encrypted_metadata: &[u8], nonce: &[u8]) -> Result<String> {
+    /// Decrypt arbitrary bytes that were produced by
+    /// [`encrypt_metadata_bytes`] (or by [`encrypt_metadata`]).
+    pub fn decrypt_metadata_bytes(&self, encrypted: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.metadata_key));
 
-        let decrypted = cipher
-            .decrypt(GenericArray::from_slice(nonce), encrypted_metadata)
-            .map_err(|_| LazarusError::EncryptionError("Failed to decrypt metadata".into()))?;
+        cipher
+            .decrypt(GenericArray::from_slice(nonce), encrypted)
+            .map_err(|_| LazarusError::EncryptionError("Failed to decrypt metadata".into()))
+    }
 
-        String::from_utf8(decrypted)
+    /// Encrypt metadata with the metadata key
+    pub fn encrypt_metadata(&self, metadata: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.encrypt_metadata_bytes(metadata.as_bytes())
+    }
+
+    /// Decrypt metadata with the metadata key
+    pub fn decrypt_metadata(&self, encrypted_metadata: &[u8], nonce: &[u8]) -> Result<String> {
+        let bytes = self.decrypt_metadata_bytes(encrypted_metadata, nonce)?;
+        String::from_utf8(bytes)
             .map_err(|_| LazarusError::EncryptionError("Invalid UTF-8 in metadata".into()))
     }
 
@@ -389,6 +401,20 @@ mod tests {
 
         // Verify decrypted matches original
         assert_eq!(decrypted, original_metadata);
+    }
+
+    #[test]
+    fn test_metadata_bytes_roundtrip_non_utf8() {
+        // bincode payloads often contain bytes that are not valid UTF-8;
+        // the byte-oriented helpers must round-trip them faithfully.
+        let (manager, _config) = KeyManager::init_repository("pw").unwrap();
+        let data: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0xC3, 0x28, 0x80, 0x81]; // invalid UTF-8
+        let (ct, nonce) = manager.encrypt_metadata_bytes(&data).unwrap();
+        let pt = manager.decrypt_metadata_bytes(&ct, &nonce).unwrap();
+        assert_eq!(pt, data);
+
+        // String-typed helper should reject non-UTF-8 plaintext.
+        assert!(manager.decrypt_metadata(&ct, &nonce).is_err());
     }
 
     #[test]
