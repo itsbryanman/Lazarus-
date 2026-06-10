@@ -473,13 +473,13 @@ pub(crate) fn parse_cpuinfo(s: &str) -> CpuInfo {
             }
         } else if line.starts_with("processor") {
             logical += 1;
-        } else if let Some(rest) = line.strip_prefix("flags") {
-            if flags.is_empty() {
-                flags = field_value(rest)
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
+        } else if let Some(rest) = line.strip_prefix("flags")
+            && flags.is_empty()
+        {
+            flags = field_value(rest)
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
         }
     }
     let physical_cores = if physical_ids.is_empty() {
@@ -602,20 +602,20 @@ pub(crate) fn parse_systemctl_enabled(s: &str) -> Vec<EnabledService> {
 fn collect_firmware() -> FirmwareInfo {
     let uefi = std::path::Path::new("/sys/firmware/efi").exists();
     let mut secure_boot = false;
-    if uefi {
-        if let Ok(entries) = std::fs::read_dir("/sys/firmware/efi/efivars") {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("SecureBoot-") {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        // EFI variable format: 4-byte attribute header then data.
-                        if bytes.len() >= 5 {
-                            secure_boot = bytes[4] == 1;
-                        }
+    if uefi
+        && let Ok(entries) = std::fs::read_dir("/sys/firmware/efi/efivars")
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("SecureBoot-") {
+                if let Ok(bytes) = std::fs::read(entry.path()) {
+                    // EFI variable format: 4-byte attribute header then data.
+                    if bytes.len() >= 5 {
+                        secure_boot = bytes[4] == 1;
                     }
-                    break;
                 }
+                break;
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::io::{self, ErrorKind};
+use std::io;
 use std::process::Command;
 
 use sysinfo::Disks;
@@ -34,10 +34,9 @@ pub fn wipe_and_format(target: &str) -> io::Result<()> {
 
     match status {
         Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(io::Error::new(
-            ErrorKind::Other,
-            format!("mkfs.ext4 exited with status {status}"),
-        )),
+        Ok(status) => Err(io::Error::other(format!(
+            "mkfs.ext4 exited with status {status}"
+        ))),
         Err(err) => Err(err),
     }
 }

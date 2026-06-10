@@ -29,8 +29,10 @@ pub struct SshHostKeysBlob {
 }
 
 pub async fn capture_ssh_host_keys(
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] opts: &CaptureOpts,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<'_>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] _opts: &CaptureOpts,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<
+        '_,
+    >,
 ) -> Result<(SshHostKeysRef, Vec<CaptureWarning>)> {
     #[cfg(not(target_os = "linux"))]
     {

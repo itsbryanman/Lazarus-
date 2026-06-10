@@ -1,5 +1,5 @@
 use crate::error::{LazarusError, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -60,11 +60,11 @@ impl CatalogIndex {
         let conn =
             Connection::open(db_path).map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
 
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")
+        conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "foreign_keys", &"ON")
+        conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;

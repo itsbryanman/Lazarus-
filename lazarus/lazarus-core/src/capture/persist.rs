@@ -43,6 +43,7 @@ pub struct FingerprintPersister<'a> {
     pub(crate) buffered: Mutex<Vec<BufferedWrite>>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct BufferedWrite {
     pub hex: String,
     pub kind: BufferedKind,
@@ -121,9 +122,8 @@ impl<'a> FingerprintPersister<'a> {
     pub async fn load_blob_metadata_key<T: DeserializeOwned>(&self, hex_hash: &str) -> Result<T> {
         let plaintext = self.get_metadata_key_bytes(hex_hash).await?;
         let body = strip_header(&plaintext, MAGIC_SENSITIVE_BLOB, "sensitive_blob")?;
-        bincode::deserialize(body).map_err(|e| {
-            LazarusError::SerializationError(format!("blob bincode decode: {e}"))
-        })
+        bincode::deserialize(body)
+            .map_err(|e| LazarusError::SerializationError(format!("blob bincode decode: {e}")))
     }
 
     // --- internals -------------------------------------------------------
@@ -193,9 +193,8 @@ impl<'a> FingerprintPersister<'a> {
     }
 
     fn register_ref(&self, hex_hash: &str) -> Result<()> {
-        let bytes = hex::decode(hex_hash).map_err(|e| {
-            LazarusError::Storage(format!("invalid chunk hash hex: {e}"))
-        })?;
+        let bytes = hex::decode(hex_hash)
+            .map_err(|e| LazarusError::Storage(format!("invalid chunk hash hex: {e}")))?;
         if bytes.len() != 32 {
             return Err(LazarusError::Storage(format!(
                 "expected 32-byte BLAKE3 hash, got {}",
@@ -283,7 +282,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
         let got = persister.load_fingerprint(&hash).await.unwrap();
@@ -298,7 +298,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", true);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", true);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
         assert_eq!(hash.len(), 64);
@@ -313,7 +314,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
 
@@ -334,7 +336,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
 

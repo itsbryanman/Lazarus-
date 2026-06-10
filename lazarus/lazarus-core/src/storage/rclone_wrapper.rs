@@ -70,12 +70,10 @@ impl RcloneStorage {
             .spawn()
             .map_err(|e| LazarusError::Storage(format!("Failed to spawn rclone: {e}")))?;
 
-        if let Some(data) = input {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(data).await.map_err(|e| {
-                    LazarusError::Storage(format!("Failed to stream data to rclone: {e}"))
-                })?;
-            }
+        if let Some(data) = input && let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(data).await.map_err(|e| {
+                LazarusError::Storage(format!("Failed to stream data to rclone: {e}"))
+            })?;
         }
 
         let output = child

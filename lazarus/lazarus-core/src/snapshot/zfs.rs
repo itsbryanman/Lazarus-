@@ -81,7 +81,9 @@ impl ZfsSnapshot {
                 LazarusError::Storage(format!("zfs clone not runnable: {e}"))
             })?;
         if !clone_out.status.success() {
-            let stderr = String::from_utf8_lossy(&clone_out.stderr).trim().to_string();
+            let stderr = String::from_utf8_lossy(&clone_out.stderr)
+                .trim()
+                .to_string();
             let _ = destroy_snapshot(&snapshot_name);
             return Err(LazarusError::Storage(format!("zfs clone failed: {stderr}")));
         }

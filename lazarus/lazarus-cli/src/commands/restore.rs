@@ -364,6 +364,7 @@ fn ensure_block_manifest_v2(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_block_device(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -631,7 +632,7 @@ fn create_progress_bar(total_bytes: u64, message: &str) -> ProgressBar {
 }
 
 fn dialoguer_error(err: dialoguer::Error) -> LazarusError {
-    LazarusError::Io(io::Error::new(io::ErrorKind::Other, err))
+    LazarusError::Io(io::Error::other(err))
 }
 
 async fn apply_metadata(path: &Path, metadata: &ObjectMetadata) -> Result<()> {

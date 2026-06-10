@@ -44,8 +44,8 @@ pub use packages::{PackageEntry, PackageManager, PackageManifest};
 pub use persist::FingerprintPersister;
 pub use secrets::{SshHostKeysBlob, SshHostKeysRef};
 pub use system::{
-    capture_system, CaptureOpts, CaptureReport, CaptureWarning, CpuInfo, EnabledService,
-    FilesystemInfo, FirmwareInfo, KernelInfo, NamedBlob, SystemFingerprint,
+    CaptureOpts, CaptureReport, CaptureWarning, CpuInfo, EnabledService, FilesystemInfo,
+    FirmwareInfo, KernelInfo, NamedBlob, SystemFingerprint, capture_system,
 };
 pub use users::{UserDatabaseBlob, UserDatabaseRef};
 

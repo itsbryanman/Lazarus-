@@ -65,7 +65,10 @@ pub async fn run(args: &SystemSnapshotArgs) -> Result<()> {
     let report = capture_system(&opts, &persister).await?;
 
     if args.dry_run {
-        println!("Dry run: captured {} component(s)", component_count(&report.fingerprint));
+        println!(
+            "Dry run: captured {} component(s)",
+            component_count(&report.fingerprint)
+        );
         print_warnings(&report.fingerprint.warnings);
         println!("Elapsed: {:.2}s", report.elapsed.as_secs_f64());
         return Ok(());
@@ -95,13 +98,15 @@ pub async fn run(args: &SystemSnapshotArgs) -> Result<()> {
     });
     let snapshot_metadata_blob =
         encrypt_snapshot_metadata(&key_manager, &snapshot_metadata_json.to_string())?;
-    catalog.create_snapshot(&snapshot_id, timestamp, root_object_id, &snapshot_metadata_blob)?;
+    catalog.create_snapshot(
+        &snapshot_id,
+        timestamp,
+        root_object_id,
+        &snapshot_metadata_blob,
+    )?;
 
     // Write the SnapshotMetadata sidecar entry.
-    let meta_store = MetadataStore::open(
-        config_mgr.repo_path(),
-        *key_manager.get_metadata_key(),
-    );
+    let meta_store = MetadataStore::open(config_mgr.repo_path(), *key_manager.get_metadata_key());
     let sidecar = SnapshotMetadata {
         hostname: Some(
             hostname::get()
@@ -146,8 +151,12 @@ pub fn build_capture_opts(args: &SystemSnapshotArgs) -> CaptureOpts {
 fn component_count(fp: &SystemFingerprint) -> usize {
     let mut count = 1; // always have kernel/cpu/memory
     count += fp.disks.len();
-    if fp.lvm.is_some() { count += 1; }
-    if fp.mdadm.is_some() { count += 1; }
+    if fp.lvm.is_some() {
+        count += 1;
+    }
+    if fp.mdadm.is_some() {
+        count += 1;
+    }
     count += fp.filesystems.len();
     count += fp.services.len();
     count

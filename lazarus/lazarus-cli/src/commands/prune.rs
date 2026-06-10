@@ -7,7 +7,7 @@ use lazarus_core::error::Result;
 use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Args)]
@@ -40,10 +40,7 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
     let catalog = CatalogIndex::new(config_mgr.database_path())?;
     let storage = LocalStorage::new(config_mgr.data_path());
     let dedup = DedupTable::open(config_mgr.database_path())?;
-    let meta_store = MetadataStore::open(
-        config_mgr.repo_path(),
-        *key_manager.get_metadata_key(),
-    );
+    let meta_store = MetadataStore::open(config_mgr.repo_path(), *key_manager.get_metadata_key());
 
     let snapshots = catalog.list_snapshots()?;
     if snapshots.is_empty() {
@@ -91,30 +88,42 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
         .collect();
 
     // --- DedupTable-only chunk pruning (fingerprint chunks) ---
-    // Drop dedup references for pruned snapshots and collect chunks
-    // whose refcount hit zero.
-    let mut dedup_reclaimable: Vec<String> = Vec::new();
-    for id in &dropped_snapshots {
-        let newly_free = dedup.remove_snapshot_references(id)?;
-        for hex in newly_free {
-            // Only add if not already in the catalog-tracked set
-            // (avoid double-delete).
-            if !reclaimable.iter().any(|r| r == &hex) {
-                dedup_reclaimable.push(hex);
+    let dedup_reclaimable: Vec<String> = if args.dry_run {
+        let mut dropped_refs_by_hash: HashMap<String, usize> = HashMap::new();
+        for id in &dropped_snapshots {
+            for hex in dedup.chunks_for_snapshot(id)? {
+                *dropped_refs_by_hash.entry(hex).or_insert(0) += 1;
             }
         }
-    }
+
+        let mut would_free = Vec::new();
+        for (hex, dropped_refs) in dropped_refs_by_hash {
+            if let Some(bytes) = hex_to_array(&hex) {
+                let current_refs = dedup.refcount(&bytes)? as usize;
+                if current_refs == dropped_refs && !reclaimable.iter().any(|r| r == &hex) {
+                    would_free.push(hex);
+                }
+            }
+        }
+        would_free
+    } else {
+        let mut freed = Vec::new();
+        for id in &dropped_snapshots {
+            let newly_free = dedup.remove_snapshot_references(id)?;
+            for hash in newly_free {
+                let hex = hash
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
+                if !reclaimable.iter().any(|r| r == &hex) {
+                    freed.push(hex);
+                }
+            }
+        }
+        freed
+    };
 
     let total_reclaimable = reclaimable.len() + dedup_reclaimable.len();
-    if total_reclaimable == 0 {
-        // Still need to clean up dropped snapshot rows.
-        for id in &dropped_snapshots {
-            catalog.delete_snapshot(id)?;
-            let _ = meta_store.delete(id);
-        }
-        println!("All chunks are referenced by retained snapshots.");
-        return Ok(());
-    }
 
     println!(
         "Identified {} orphan chunk(s) ({} catalog, {} fingerprint/dedup-only)",
@@ -133,6 +142,16 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
         for id in &dropped_snapshots {
             println!("  would drop snapshot {}", id);
         }
+        return Ok(());
+    }
+
+    if total_reclaimable == 0 {
+        // Still need to clean up dropped snapshot rows and metadata.
+        for id in &dropped_snapshots {
+            catalog.delete_snapshot(id)?;
+            let _ = meta_store.delete(id);
+        }
+        println!("No orphan chunks found; dropped snapshot rows cleaned up.");
         return Ok(());
     }
 
@@ -182,6 +201,17 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
 
     println!("Prune complete. Removed {} chunk(s)", removed);
     Ok(())
+}
+
+fn hex_to_array(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 fn select_snapshots_to_keep(
@@ -256,4 +286,3 @@ fn mark_object_chunks(
 
     Ok(())
 }
-

@@ -116,8 +116,8 @@ impl JobScheduler {
     }
 
     fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(())
     }
 
@@ -226,29 +226,24 @@ impl JobScheduler {
                     .query(params![JobStatus::Pending.as_str(), now])
                     .map_err(|e| e.to_string())?;
 
-                loop {
-                    match rows.next().map_err(|e| e.to_string())? {
-                        Some(row) => {
-                            let mut job = Self::job_from_row(&row).map_err(|e| e.to_string())?;
-                            let updated = tx
-                                .execute(
-                                    "UPDATE jobs SET status = ?, agent_id = ? WHERE id = ? AND status = ?",
-                                    params![
-                                        JobStatus::Assigned.as_str(),
-                                        agent.as_str(),
-                                        job.job_id.as_str(),
-                                        JobStatus::Pending.as_str()
-                                    ],
-                                )
-                                .map_err(|e| e.to_string())?;
+                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                    let mut job = Self::job_from_row(row).map_err(|e| e.to_string())?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE jobs SET status = ?, agent_id = ? WHERE id = ? AND status = ?",
+                            params![
+                                JobStatus::Assigned.as_str(),
+                                agent.as_str(),
+                                job.job_id.as_str(),
+                                JobStatus::Pending.as_str()
+                            ],
+                        )
+                        .map_err(|e| e.to_string())?;
 
-                            if updated == 1 {
-                                job.status = JobStatus::Assigned;
-                                job.agent_id = Some(agent.clone());
-                                jobs.push(job);
-                            }
-                        }
-                        None => break,
+                    if updated == 1 {
+                        job.status = JobStatus::Assigned;
+                        job.agent_id = Some(agent.clone());
+                        jobs.push(job);
                     }
                 }
             }
@@ -375,7 +370,7 @@ impl JobScheduler {
                 .map_err(|e| e.to_string())?;
 
             let job = stmt
-                .query_row(params![job_id_owned.as_str()], |row| Self::job_from_row(row))
+                .query_row(params![job_id_owned.as_str()], Self::job_from_row)
                 .optional()
                 .map_err(|e| e.to_string())?;
 
@@ -407,11 +402,8 @@ impl JobScheduler {
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
             let mut jobs = Vec::new();
 
-            loop {
-                match rows.next().map_err(|e| e.to_string())? {
-                    Some(row) => jobs.push(Self::job_from_row(&row).map_err(|e| e.to_string())?),
-                    None => break,
-                }
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                jobs.push(Self::job_from_row(row).map_err(|e| e.to_string())?);
             }
 
             Ok::<Vec<Job>, String>(jobs)
@@ -458,7 +450,7 @@ impl JobScheduler {
             let mut created = 0;
 
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                let job = Self::job_from_row(&row).map_err(|e| e.to_string())?;
+                let job = Self::job_from_row(row).map_err(|e| e.to_string())?;
                 let cron_expr: Option<String> = row
                     .get::<_, Option<String>>("schedule_cron")
                     .map_err(|e| e.to_string())?;
@@ -499,8 +491,7 @@ impl JobScheduler {
                 if now >= next_run_ts {
                     let next_after = schedule
                         .upcoming(Utc)
-                        .skip_while(|dt| dt.timestamp() <= next_run_ts)
-                        .next()
+                        .find(|dt| dt.timestamp() > next_run_ts)
                         .map(|dt| dt.timestamp())
                         .unwrap_or(next_run_ts + 60);
 

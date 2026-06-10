@@ -1,7 +1,7 @@
 //! Integration test: fingerprint chunks are protected during prune when
 //! references exist, and reclaimed once all references are gone.
 
-use lazarus_core::capture::persist::{sharded_key, FingerprintPersister};
+use lazarus_core::capture::persist::{FingerprintPersister, sharded_key};
 use lazarus_core::catalog::index::CatalogIndex;
 use lazarus_core::encryption::key_manager::KeyManager;
 use lazarus_core::snapshot::dedup::DedupTable;
@@ -72,7 +72,7 @@ async fn fingerprint_chunk_survives_partial_prune() {
     // Prune snap-2: chunk should become reclaimable.
     let freed = dedup.remove_snapshot_references("snap-2").unwrap();
     assert_eq!(freed.len(), 1);
-    assert_eq!(freed[0], hash);
+    assert_eq!(freed[0], hash_to_bytes(&hash));
 
     // Delete the chunk from storage (what prune would do).
     storage.delete(&key).await.unwrap();

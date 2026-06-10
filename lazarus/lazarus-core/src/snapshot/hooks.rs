@@ -226,20 +226,14 @@ fn run_command(name: &str, phase: HookPhase, hook: &ApplicationHook) -> HookOutc
 }
 
 fn rule_matches(rule: &HookMatch) -> bool {
-    if let Some(svc) = &rule.service {
-        if !systemd_unit_loaded(svc) {
-            return false;
-        }
+    if let Some(svc) = &rule.service && !systemd_unit_loaded(svc) {
+        return false;
     }
-    if let Some(proc_name) = &rule.process {
-        if !process_running(proc_name) {
-            return false;
-        }
+    if let Some(proc_name) = &rule.process && !process_running(proc_name) {
+        return false;
     }
-    if let Some(p) = &rule.path {
-        if !p.exists() {
-            return false;
-        }
+    if let Some(p) = &rule.path && !p.exists() {
+        return false;
     }
     true
 }
@@ -270,10 +264,8 @@ fn process_running(name: &str) -> bool {
         {
             continue;
         }
-        if let Ok(comm) = std::fs::read_to_string(p.join("comm")) {
-            if comm.trim() == name {
-                return true;
-            }
+        if let Ok(comm) = std::fs::read_to_string(p.join("comm")) && comm.trim() == name {
+            return true;
         }
     }
     false
@@ -334,12 +326,7 @@ pub mod builtins {
 
     /// Redis: SAVE forces a synchronous RDB write. Post is a no-op.
     pub fn redis() -> ApplicationHook {
-        hook(
-            "redis",
-            "redis-server",
-            "redis-cli SAVE",
-            "true",
-        )
+        hook("redis", "redis-server", "redis-cli SAVE", "true")
     }
 
     /// libvirt: fsfreeze the guest filesystem via the QEMU guest agent.

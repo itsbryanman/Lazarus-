@@ -6,12 +6,12 @@ use lazarus_common::lazarus::agent::{
     JobCompletionRequest, JobStatistics, JobType, ProgressUpdate, RegisterRequest,
 };
 use lazarus_core::catalog::index::{CatalogIndex, ObjectMetadata, ObjectType};
-use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::chunking::cdc::CdcChunker;
 use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::LazarusError;
 use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
+use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
 use std::convert::TryFrom;
@@ -593,7 +593,10 @@ impl Agent {
                     for i in 0..32 {
                         match u8::from_str_radix(&hash[i * 2..i * 2 + 2], 16) {
                             Ok(b) => bytes[i] = b,
-                            Err(_) => { valid = false; break; }
+                            Err(_) => {
+                                valid = false;
+                                break;
+                            }
                         }
                     }
                     if valid && dedup.refcount(&bytes).unwrap_or(0) > 0 {
@@ -995,6 +998,7 @@ impl RestoreProgress {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_file(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -1044,6 +1048,7 @@ async fn restore_file(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_directory(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -1107,7 +1112,10 @@ async fn restore_directory(
                 .await?;
             }
             ObjectType::SystemFingerprint => {
-                return Err("nested SystemFingerprint objects are not supported in file-tree restore".into());
+                return Err(
+                    "nested SystemFingerprint objects are not supported in file-tree restore"
+                        .into(),
+                );
             }
         }
     }

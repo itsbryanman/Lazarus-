@@ -320,10 +320,13 @@ mod linux {
                 }
             }
             Err(e) => {
-                warnings.push(CaptureWarning::new(
-                    "disk",
-                    format!("could not read sector 0 of {device}: {e}"),
-                ).with_remediation("re-run as root"));
+                warnings.push(
+                    CaptureWarning::new(
+                        "disk",
+                        format!("could not read sector 0 of {device}: {e}"),
+                    )
+                    .with_remediation("re-run as root"),
+                );
                 TableKind::None
             }
         };

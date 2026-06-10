@@ -155,41 +155,31 @@ mod linux {
 
         let mut pvs_args = vec!["pvs", "-o", "pv_name,vg_name,pv_uuid,pv_size"];
         pvs_args.extend_from_slice(units);
-        let physical_volumes = match super::super::util::run_capture_str(
-            "lvm",
-            &pvs_args,
-            opts.tool_timeout,
-        )
-        .await
-        {
-            Ok(s) => parse_pvs_json(&s).unwrap_or_else(|e| {
-                warnings.push(CaptureWarning::new("lvm", format!("pvs parse: {e}")));
-                Vec::new()
-            }),
-            Err(e) => {
-                warnings.push(CaptureWarning::new("lvm", format!("pvs: {e}")));
-                Vec::new()
-            }
-        };
+        let physical_volumes =
+            match super::super::util::run_capture_str("lvm", &pvs_args, opts.tool_timeout).await {
+                Ok(s) => parse_pvs_json(&s).unwrap_or_else(|e| {
+                    warnings.push(CaptureWarning::new("lvm", format!("pvs parse: {e}")));
+                    Vec::new()
+                }),
+                Err(e) => {
+                    warnings.push(CaptureWarning::new("lvm", format!("pvs: {e}")));
+                    Vec::new()
+                }
+            };
 
         let mut vgs_args = vec!["vgs", "-o", "vg_name,vg_uuid,vg_size,vg_free,pv_count"];
         vgs_args.extend_from_slice(units);
-        let volume_groups = match super::super::util::run_capture_str(
-            "lvm",
-            &vgs_args,
-            opts.tool_timeout,
-        )
-        .await
-        {
-            Ok(s) => parse_vgs_json(&s).unwrap_or_else(|e| {
-                warnings.push(CaptureWarning::new("lvm", format!("vgs parse: {e}")));
-                Vec::new()
-            }),
-            Err(e) => {
-                warnings.push(CaptureWarning::new("lvm", format!("vgs: {e}")));
-                Vec::new()
-            }
-        };
+        let volume_groups =
+            match super::super::util::run_capture_str("lvm", &vgs_args, opts.tool_timeout).await {
+                Ok(s) => parse_vgs_json(&s).unwrap_or_else(|e| {
+                    warnings.push(CaptureWarning::new("lvm", format!("vgs parse: {e}")));
+                    Vec::new()
+                }),
+                Err(e) => {
+                    warnings.push(CaptureWarning::new("lvm", format!("vgs: {e}")));
+                    Vec::new()
+                }
+            };
 
         let mut lvs_args = vec![
             "lvs",
@@ -197,22 +187,17 @@ mod linux {
             "lv_name,vg_name,lv_uuid,lv_size,origin,lv_attr",
         ];
         lvs_args.extend_from_slice(units);
-        let logical_volumes = match super::super::util::run_capture_str(
-            "lvm",
-            &lvs_args,
-            opts.tool_timeout,
-        )
-        .await
-        {
-            Ok(s) => parse_lvs_json(&s).unwrap_or_else(|e| {
-                warnings.push(CaptureWarning::new("lvm", format!("lvs parse: {e}")));
-                Vec::new()
-            }),
-            Err(e) => {
-                warnings.push(CaptureWarning::new("lvm", format!("lvs: {e}")));
-                Vec::new()
-            }
-        };
+        let logical_volumes =
+            match super::super::util::run_capture_str("lvm", &lvs_args, opts.tool_timeout).await {
+                Ok(s) => parse_lvs_json(&s).unwrap_or_else(|e| {
+                    warnings.push(CaptureWarning::new("lvm", format!("lvs parse: {e}")));
+                    Vec::new()
+                }),
+                Err(e) => {
+                    warnings.push(CaptureWarning::new("lvm", format!("lvs: {e}")));
+                    Vec::new()
+                }
+            };
 
         let mut vg_backups: Vec<VgBackup> = Vec::new();
         for vg in &volume_groups {

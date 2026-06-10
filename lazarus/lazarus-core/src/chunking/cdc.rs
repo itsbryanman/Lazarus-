@@ -1,5 +1,6 @@
-/// Content-Defined Chunking (CDC) implementation using FastCDC algorithm
-/// This provides variable-size chunking for better deduplication compared to fixed-size chunking
+//! Content-Defined Chunking (CDC) implementation using FastCDC algorithm.
+//! This provides variable-size chunking for better deduplication compared to
+//! fixed-size chunking.
 
 const MIN_CHUNK_SIZE: usize = 2 * 1024; // 2KB
 const AVG_CHUNK_SIZE: usize = 8 * 1024; // 8KB

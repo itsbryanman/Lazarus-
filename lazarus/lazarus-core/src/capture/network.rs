@@ -123,19 +123,22 @@ mod linux {
 
         let interfaces = enumerate_interfaces(&mut warnings);
 
-        let routes =
-            match super::super::util::run_capture_str("ip", &["-j", "route", "show"], opts.tool_timeout)
-                .await
-            {
-                Ok(s) => parse_ip_route_json(&s).unwrap_or_else(|_| Vec::new()),
-                Err(_) => {
-                    warnings.push(CaptureWarning::new(
-                        "network",
-                        "`ip` unavailable; routes not captured",
-                    ));
-                    Vec::new()
-                }
-            };
+        let routes = match super::super::util::run_capture_str(
+            "ip",
+            &["-j", "route", "show"],
+            opts.tool_timeout,
+        )
+        .await
+        {
+            Ok(s) => parse_ip_route_json(&s).unwrap_or_else(|_| Vec::new()),
+            Err(_) => {
+                warnings.push(CaptureWarning::new(
+                    "network",
+                    "`ip` unavailable; routes not captured",
+                ));
+                Vec::new()
+            }
+        };
 
         let resolv_conf = fs::read_to_string("/etc/resolv.conf").ok();
         let hosts = fs::read_to_string("/etc/hosts").ok();
@@ -172,10 +175,7 @@ mod linux {
         let entries = match fs::read_dir("/sys/class/net") {
             Ok(e) => e,
             Err(_) => {
-                warnings.push(CaptureWarning::new(
-                    "network",
-                    "/sys/class/net unreadable",
-                ));
+                warnings.push(CaptureWarning::new("network", "/sys/class/net unreadable"));
                 return out;
             }
         };
@@ -277,7 +277,10 @@ mod linux {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let gw = item.get("gateway").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let gw = item
+                    .get("gateway")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let dev = item
                     .get("dev")
                     .and_then(|v| v.as_str())

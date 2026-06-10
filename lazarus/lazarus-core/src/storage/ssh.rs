@@ -211,10 +211,8 @@ impl StorageBackend for SshStorage {
 
         let mut result = Vec::new();
         for (path, stat) in entries {
-            if stat.is_file() {
-                if let Some(path_str) = path.to_str() {
-                    result.push(path_str.to_string());
-                }
+            if stat.is_file() && let Some(path_str) = path.to_str() {
+                result.push(path_str.to_string());
             }
         }
 

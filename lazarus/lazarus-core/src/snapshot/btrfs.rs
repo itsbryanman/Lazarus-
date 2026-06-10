@@ -162,7 +162,7 @@ fn is_btrfs_filesystem(path: &Path) -> Option<bool> {
     if rc != 0 {
         return Some(false);
     }
-    Some(i64::from(buf.f_type) == BTRFS_SUPER_MAGIC)
+    Some(buf.f_type == BTRFS_SUPER_MAGIC)
 }
 
 #[cfg(not(target_os = "linux"))]

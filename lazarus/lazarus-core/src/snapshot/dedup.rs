@@ -41,11 +41,11 @@ impl DedupTable {
     pub fn open<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let conn = Connection::open(db_path.as_ref())
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")
+        conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "foreign_keys", &"ON")
+        conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
@@ -114,7 +114,7 @@ impl DedupTable {
     /// chunks whose refcount reached zero as a result. This is the clean
     /// shape for prune: it tells the caller exactly which chunks are now
     /// reclaimable.
-    pub fn remove_snapshot_references(&self, snapshot_id: &str) -> Result<Vec<String>> {
+    pub fn remove_snapshot_references(&self, snapshot_id: &str) -> Result<Vec<[u8; 32]>> {
         // Collect the chunk hashes this snapshot references before deleting.
         let mut stmt = self
             .conn
@@ -140,8 +140,7 @@ impl DedupTable {
         let mut newly_unreferenced = Vec::new();
         for hash in &hashes {
             if self.refcount(hash)? == 0 {
-                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-                newly_unreferenced.push(hex);
+                newly_unreferenced.push(*hash);
             }
         }
         Ok(newly_unreferenced)
@@ -279,11 +278,7 @@ impl DedupTable {
 
     /// Add many references in a single transaction. Hot-path optimization for
     /// snapshots with millions of chunks.
-    pub fn add_references_batch(
-        &mut self,
-        snapshot_id: &str,
-        chunks: &[[u8; 32]],
-    ) -> Result<()> {
+    pub fn add_references_batch(&mut self, snapshot_id: &str, chunks: &[[u8; 32]]) -> Result<()> {
         let tx = self
             .conn
             .transaction()

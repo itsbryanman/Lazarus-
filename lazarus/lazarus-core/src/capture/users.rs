@@ -32,8 +32,10 @@ pub struct UserDatabaseBlob {
 }
 
 pub async fn capture_users(
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] opts: &CaptureOpts,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<'_>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] _opts: &CaptureOpts,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<
+        '_,
+    >,
 ) -> Result<(UserDatabaseRef, Vec<CaptureWarning>)> {
     #[cfg(not(target_os = "linux"))]
     {
