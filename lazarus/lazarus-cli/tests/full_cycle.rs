@@ -45,6 +45,8 @@ async fn full_cycle_backup_and_restore_matches_hashes() {
         device: None,
         no_hooks: false,
         hook_templates: Vec::new(),
+        capture_system: false,
+        capture_system_only: false,
     };
     backup(&backup_args).await.expect("backup succeeds");
 

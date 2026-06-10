@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::persist::FingerprintPersister;
 use super::system::{CaptureOpts, CaptureWarning, NamedBlob};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BootloaderConfig {

@@ -8,4 +8,5 @@ pub mod restore;
 pub mod retention;
 pub mod security;
 pub mod snapshot_utils;
+pub mod system_snapshot;
 pub mod verify;

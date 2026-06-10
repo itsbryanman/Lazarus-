@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::system::{CaptureOpts, CaptureWarning, NamedBlob};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackageManifest {

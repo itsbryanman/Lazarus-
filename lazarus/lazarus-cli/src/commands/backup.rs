@@ -96,6 +96,14 @@ pub struct BackupArgs {
     /// names: `postgres`, `mysql`, `mongodb`, `redis`, `docker`, `all`.
     #[arg(long = "hook-template", value_name = "NAME")]
     pub hook_templates: Vec<String>,
+
+    /// Also capture a bare-metal system fingerprint alongside this backup (Linux, needs root).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub capture_system: bool,
+
+    /// Capture only the system fingerprint; skip the file/block pipeline.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub capture_system_only: bool,
 }
 
 impl Default for BackupArgs {
@@ -111,6 +119,8 @@ impl Default for BackupArgs {
             device: None,
             no_hooks: false,
             hook_templates: Vec::new(),
+            capture_system: false,
+            capture_system_only: false,
         }
     }
 }
@@ -256,6 +266,26 @@ fn build_hook_runner(templates: &[String]) -> Result<HookRunner> {
 }
 
 pub async fn backup(args: &BackupArgs) -> Result<()> {
+    // --capture-system-only: delegate entirely to the system snapshot command.
+    if args.capture_system_only {
+        let sys_args = super::system_snapshot::SystemSnapshotArgs {
+            repository: args.repository.clone(),
+            password: args.password.clone(),
+            tag: None,
+            dry_run: false,
+            print: false,
+            tool_timeout: 30,
+            skip_packages: false,
+            skip_network: false,
+            skip_users: false,
+            skip_ssh: false,
+            skip_bootloader: false,
+            skip_lvm: false,
+            skip_mdadm: false,
+        };
+        return super::system_snapshot::run(&sys_args).await;
+    }
+
     println!("Starting backup...");
 
     let cfg = validate_args(args)?;
@@ -430,7 +460,44 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     let mut dedup = DedupTable::open(config_mgr.database_path())?;
     dedup.add_references_batch(&snapshot_id, &chunks)?;
 
-    println!("✓ Backup completed successfully!");
+    // --capture-system: attach a system fingerprint to this snapshot.
+    // Failures are non-fatal: the file backup is already committed.
+    if args.capture_system {
+        if let Some(ref source) = args.source {
+            let source_path = PathBuf::from(source);
+            let is_root = source_path == PathBuf::from("/");
+            let is_block = source_path
+                .metadata()
+                .map(|m| !m.is_dir() && !m.is_file())
+                .unwrap_or(false);
+            if !is_root && !is_block {
+                println!("warning: fingerprint reflects the capturing host, not the source tree");
+            }
+        }
+        match run_capture_system(&config_mgr, &key_manager, &catalog, &dedup, &snapshot_id).await {
+            Ok(fp_hash) => {
+                // Update the metadata sidecar entry with fingerprint info.
+                let meta_store = lazarus_core::catalog::metadata::MetadataStore::open(
+                    config_mgr.repo_path(),
+                    *key_manager.get_metadata_key(),
+                );
+                let mut sidecar = meta_store
+                    .get(&snapshot_id)?
+                    .unwrap_or_default();
+                sidecar.system_fingerprint_chunk = Some(fp_hash.clone());
+                sidecar.system_fingerprint_format_version = Some(1);
+                if let Err(e) = meta_store.put(&snapshot_id, &sidecar) {
+                    println!("warning: failed to update sidecar with fingerprint: {}", e);
+                }
+                println!("  System fingerprint: {}", fp_hash);
+            }
+            Err(e) => {
+                println!("warning: system capture failed (backup is intact): {}", e);
+            }
+        }
+    }
+
+    println!("Backup completed successfully!");
     println!("  Snapshot ID: {}", snapshot_id);
 
     let (chunks, objects, snapshots) = catalog.get_stats()?;
@@ -440,6 +507,29 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     println!("    Snapshots: {}", snapshots);
 
     Ok(())
+}
+
+/// Run the system capture pipeline and persist the fingerprint under the given snapshot.
+async fn run_capture_system(
+    config_mgr: &ConfigManager,
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    catalog: &CatalogIndex,
+    dedup: &DedupTable,
+    snapshot_id: &str,
+) -> Result<String> {
+    use lazarus_core::capture::persist::FingerprintPersister;
+    use lazarus_core::capture::system::CaptureOpts;
+    use lazarus_core::capture::capture_system;
+
+    let storage = LocalStorage::new(config_mgr.data_path());
+    let opts = CaptureOpts::default();
+    let persister = FingerprintPersister::new(
+        &storage, key_manager, catalog, dedup, snapshot_id, false,
+    );
+
+    let report = capture_system(&opts, &persister).await?;
+    let fp_hash = persister.persist_fingerprint(&report.fingerprint).await?;
+    Ok(fp_hash)
 }
 
 struct AcquiredReadPath {
@@ -1154,6 +1244,8 @@ mod tests {
             device: None,
             no_hooks: false,
             hook_templates: Vec::new(),
+            capture_system: false,
+            capture_system_only: false,
         }
     }
 

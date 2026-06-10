@@ -28,15 +28,14 @@ use crate::catalog::history::{History, Operation};
 use crate::catalog::index::CatalogIndex;
 use crate::catalog::metadata::{MetadataStore, SnapshotMetadata};
 use crate::encryption::aes::StreamingEncryptor;
-use crate::error::{LazarusError, Result};
+use crate::error::Result;
 use crate::integrity::merkle::{self, Node};
 use crate::snapshot::block_tracker::BlockTracker;
-use crate::snapshot::dedup::{DedupStats, DedupTable};
+use crate::snapshot::dedup::DedupTable;
 use crate::storage::backend::{RetentionLock, StorageBackend};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Identifier for a snapshot. Currently a timestamp-derived string but typed
 /// so call sites are self-documenting and we can swap the format later

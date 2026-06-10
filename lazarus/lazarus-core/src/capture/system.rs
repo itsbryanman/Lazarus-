@@ -187,7 +187,7 @@ pub struct CaptureReport {
 pub async fn capture_system(
     opts: &CaptureOpts,
     persister: &FingerprintPersister<'_>,
-) -> lazarus_core::error::Result<CaptureReport> {
+) -> crate::error::Result<CaptureReport> {
     use std::time::Instant;
     let start = Instant::now();
 
@@ -332,8 +332,8 @@ pub async fn capture_system(
 pub async fn capture_system(
     _opts: &CaptureOpts,
     _persister: &FingerprintPersister<'_>,
-) -> lazarus_core::error::Result<CaptureReport> {
-    Err(lazarus_core::error::LazarusError::Storage(
+) -> crate::error::Result<CaptureReport> {
+    Err(crate::error::LazarusError::Storage(
         "system fingerprint capture is Linux-only".into(),
     ))
 }

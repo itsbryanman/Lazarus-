@@ -50,7 +50,7 @@ pub use system::{
 pub use users::{UserDatabaseBlob, UserDatabaseRef};
 
 /// Capture-time error type used internally by collectors. Always
-/// converted back to `lazarus_core::error::LazarusError::Storage` at the
+/// converted back to `crate::error::LazarusError::Storage` at the
 /// orchestrator boundary so the public surface remains a single `Result`.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
@@ -66,8 +66,8 @@ pub enum CaptureError {
     Other(String),
 }
 
-impl From<CaptureError> for lazarus_core::error::LazarusError {
+impl From<CaptureError> for crate::error::LazarusError {
     fn from(e: CaptureError) -> Self {
-        lazarus_core::error::LazarusError::Storage(e.to_string())
+        crate::error::LazarusError::Storage(e.to_string())
     }
 }

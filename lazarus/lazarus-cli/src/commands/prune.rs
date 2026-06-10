@@ -1,5 +1,7 @@
 use clap::Args;
+use lazarus_core::capture::persist::sharded_key;
 use lazarus_core::catalog::index::{CatalogIndex, ObjectType};
+use lazarus_core::catalog::metadata::MetadataStore;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::Result;
 use lazarus_core::snapshot::dedup::DedupTable;
@@ -12,6 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct PruneArgs {
     #[arg(short, long, help = "Repository path")]
     pub repository: String,
+
+    #[arg(short, long, help = "Master password for decryption")]
+    pub password: String,
 
     #[arg(long, default_value_t = 5, help = "Keep the newest N snapshots")]
     pub keep_last: usize,
@@ -31,9 +36,14 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
     println!("Starting prune operation");
 
     let config_mgr = ConfigManager::new(&args.repository);
+    let key_manager = config_mgr.open_repository(&args.password).await?;
     let catalog = CatalogIndex::new(config_mgr.database_path())?;
     let storage = LocalStorage::new(config_mgr.data_path());
     let dedup = DedupTable::open(config_mgr.database_path())?;
+    let meta_store = MetadataStore::open(
+        config_mgr.repo_path(),
+        *key_manager.get_metadata_key(),
+    );
 
     let snapshots = catalog.list_snapshots()?;
     if snapshots.is_empty() {
@@ -52,6 +62,14 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
         println!("Warning: retention policy matched zero snapshots; all chunks may be pruned");
     }
 
+    // Derive the set of dropped snapshots.
+    let kept: HashSet<&String> = keep_snapshots.iter().collect();
+    let dropped_snapshots: Vec<&String> = snapshots
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| !kept.contains(id))
+        .collect();
+
     let mut active_chunks = HashSet::new();
     let mut visited_objects = HashSet::new();
     for snapshot_id in &keep_snapshots {
@@ -65,39 +83,68 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
         }
     }
 
+    // --- Catalog-tracked chunk pruning ---
     let all_chunks = catalog.list_all_chunk_hashes()?;
     let reclaimable: Vec<String> = all_chunks
         .into_iter()
         .filter(|hash| !active_chunks.contains(hash))
         .collect();
 
-    if reclaimable.is_empty() {
+    // --- DedupTable-only chunk pruning (fingerprint chunks) ---
+    // Drop dedup references for pruned snapshots and collect chunks
+    // whose refcount hit zero.
+    let mut dedup_reclaimable: Vec<String> = Vec::new();
+    for id in &dropped_snapshots {
+        let newly_free = dedup.remove_snapshot_references(id)?;
+        for hex in newly_free {
+            // Only add if not already in the catalog-tracked set
+            // (avoid double-delete).
+            if !reclaimable.iter().any(|r| r == &hex) {
+                dedup_reclaimable.push(hex);
+            }
+        }
+    }
+
+    let total_reclaimable = reclaimable.len() + dedup_reclaimable.len();
+    if total_reclaimable == 0 {
+        // Still need to clean up dropped snapshot rows.
+        for id in &dropped_snapshots {
+            catalog.delete_snapshot(id)?;
+            let _ = meta_store.delete(id);
+        }
         println!("All chunks are referenced by retained snapshots.");
         return Ok(());
     }
 
-    println!("Identified {} orphan chunk(s)", reclaimable.len());
+    println!(
+        "Identified {} orphan chunk(s) ({} catalog, {} fingerprint/dedup-only)",
+        total_reclaimable,
+        reclaimable.len(),
+        dedup_reclaimable.len()
+    );
 
     if args.dry_run {
         for hash in &reclaimable {
             println!("  would delete chunk {}", hash);
         }
+        for hash in &dedup_reclaimable {
+            println!("  would delete fingerprint chunk {}", hash);
+        }
+        for id in &dropped_snapshots {
+            println!("  would drop snapshot {}", id);
+        }
         return Ok(());
     }
 
     let mut removed = 0usize;
-    for hash in reclaimable {
-        let shard = &hash[..2];
-        let key = format!("{}/{}", shard, hash);
 
+    // Delete catalog-tracked orphan chunks.
+    for hash in reclaimable {
+        let key = sharded_key(&hash);
         match storage.delete(&key).await {
             Ok(_) => {
                 catalog.delete_file_chunks_by_hash(&hash)?;
                 catalog.delete_chunk(&hash)?;
-                if let Some(bytes) = hex_to_array(&hash) {
-                    // Defensive: ensure no stale ChunkRefs row survives.
-                    let _ = dedup.refcount(&bytes);
-                }
                 removed += 1;
                 println!("  deleted chunk {}", hash);
             }
@@ -110,14 +157,27 @@ pub async fn prune(args: &PruneArgs) -> Result<()> {
         }
     }
 
-    // Drop dedup references for snapshots that were dropped from the
-    // retention set. Important so a re-prune later doesn't see them as
-    // "alive" and refuse to remove their unique chunks.
-    let kept: HashSet<&String> = keep_snapshots.iter().collect();
-    for (id, _) in &snapshots {
-        if !kept.contains(id) {
-            dedup.drop_snapshot(id)?;
+    // Delete dedup-only (fingerprint/sensitive blob) orphan chunks.
+    for hash in dedup_reclaimable {
+        let key = sharded_key(&hash);
+        match storage.delete(&key).await {
+            Ok(_) => {
+                removed += 1;
+                println!("  deleted fingerprint chunk {}", hash);
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to delete fingerprint chunk {} from storage: {}",
+                    hash, err
+                );
+            }
         }
+    }
+
+    // Clean up dropped snapshot catalog rows and metadata sidecar entries.
+    for id in &dropped_snapshots {
+        catalog.delete_snapshot(id)?;
+        let _ = meta_store.delete(id);
     }
 
     println!("Prune complete. Removed {} chunk(s)", removed);
@@ -197,13 +257,3 @@ fn mark_object_chunks(
     Ok(())
 }
 
-fn hex_to_array(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
-}

@@ -37,6 +37,8 @@ async fn block_mode_backup_restores_sparse_image() {
         device: Some(source_path.to_string_lossy().to_string()),
         no_hooks: true,
         hook_templates: Vec::new(),
+        capture_system: false,
+        capture_system_only: false,
     };
     backup(&backup_args).await.expect("block backup succeeds");
 

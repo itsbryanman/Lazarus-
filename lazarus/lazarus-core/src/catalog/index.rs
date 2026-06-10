@@ -525,6 +525,17 @@ impl CatalogIndex {
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         Ok(())
     }
+
+    /// Remove a snapshot and its associated objects from the catalog.
+    pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM Snapshots WHERE snapshot_id = ?1",
+                params![snapshot_id],
+            )
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

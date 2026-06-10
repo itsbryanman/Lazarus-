@@ -2211,7 +2211,9 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-types",
+ "bincode",
  "blake3",
+ "hex",
  "hostname",
  "rand 0.8.5",
  "rusqlite",
@@ -2229,26 +2231,16 @@ dependencies = [
 name = "lazarus-recovery"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "bincode",
- "blake3",
  "chrono",
  "crossterm 0.28.1",
- "hex",
- "hostname",
  "lazarus-cli",
  "lazarus-core",
- "nix",
  "ratatui",
  "serde",
  "serde_json",
  "sysinfo",
  "tempfile",
- "thiserror 1.0.69",
  "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2442,17 +2434,6 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
-name = "nix"
-version = "0.27.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
-dependencies = [
- "bitflags",
- "cfg-if",
- "libc",
-]
 
 [[package]]
 name = "nom"

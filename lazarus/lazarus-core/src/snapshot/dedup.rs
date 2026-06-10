@@ -110,6 +110,61 @@ impl DedupTable {
         Ok(removed as u64)
     }
 
+    /// Drop all references for `snapshot_id` and return the hex hashes of
+    /// chunks whose refcount reached zero as a result. This is the clean
+    /// shape for prune: it tells the caller exactly which chunks are now
+    /// reclaimable.
+    pub fn remove_snapshot_references(&self, snapshot_id: &str) -> Result<Vec<String>> {
+        // Collect the chunk hashes this snapshot references before deleting.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chunk_hash FROM ChunkRefs WHERE snapshot_id = ?1")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let hashes: Vec<[u8; 32]> = stmt
+            .query_map(params![snapshot_id], |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                let mut arr = [0u8; 32];
+                if blob.len() == 32 {
+                    arr.copy_from_slice(&blob);
+                }
+                Ok(arr)
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Drop the snapshot's references.
+        self.drop_snapshot(snapshot_id)?;
+
+        // Check which of those hashes now have refcount zero.
+        let mut newly_unreferenced = Vec::new();
+        for hash in &hashes {
+            if self.refcount(hash)? == 0 {
+                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                newly_unreferenced.push(hex);
+            }
+        }
+        Ok(newly_unreferenced)
+    }
+
+    /// Return the hex hashes of all chunks referenced by `snapshot_id`.
+    pub fn chunks_for_snapshot(&self, snapshot_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chunk_hash FROM ChunkRefs WHERE snapshot_id = ?1")
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        let hashes: Vec<String> = stmt
+            .query_map(params![snapshot_id], |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                let hex: String = blob.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(hex)
+            })
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(hashes)
+    }
+
     /// Current refcount for a chunk (number of snapshots that reference it).
     pub fn refcount(&self, chunk_hash: &[u8; 32]) -> Result<u64> {
         let count: i64 = self
