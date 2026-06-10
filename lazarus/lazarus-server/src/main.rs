@@ -66,7 +66,7 @@ async fn start_server(address: &str, data_dir: &str) -> Result<(), Box<dyn std::
     // Create gRPC services
     let agent_service = AgentServiceImpl::new(agent_manager.clone(), job_scheduler.clone());
 
-    let config_mgr = ConfigManager::new(&data_dir);
+    let config_mgr = ConfigManager::new(data_dir);
     let retention_policy = config_mgr.load_retention_policy().await?;
     let retention_lock = retention_policy.as_lock();
     if retention_lock.is_some() {
@@ -75,7 +75,7 @@ async fn start_server(address: &str, data_dir: &str) -> Result<(), Box<dyn std::
             retention_policy.mode, retention_policy.min_retention_days
         );
     }
-    let chunk_service = ChunkServiceImpl::new(&data_dir, retention_lock);
+    let chunk_service = ChunkServiceImpl::new(data_dir, retention_lock);
 
     // Start scheduler in background
     let scheduler_handle = {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::persist::FingerprintPersister;
 use super::system::{CaptureOpts, CaptureWarning};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserDatabaseRef {
@@ -32,8 +32,10 @@ pub struct UserDatabaseBlob {
 }
 
 pub async fn capture_users(
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] opts: &CaptureOpts,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<'_>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] _opts: &CaptureOpts,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<
+        '_,
+    >,
 ) -> Result<(UserDatabaseRef, Vec<CaptureWarning>)> {
     #[cfg(not(target_os = "linux"))]
     {

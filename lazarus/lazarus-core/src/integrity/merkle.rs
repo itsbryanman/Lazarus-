@@ -48,7 +48,7 @@ impl MerkleTree {
             if last.len() <= 1 {
                 break;
             }
-            let mut next = Vec::with_capacity((last.len() + 1) / 2);
+            let mut next = Vec::with_capacity(last.len().div_ceil(2));
             let mut i = 0;
             while i < last.len() {
                 if i + 1 == last.len() {

@@ -30,6 +30,8 @@ enum Commands {
     Security(commands::security::SecurityArgs),
     /// Recovery utilities (ISO builder, etc.)
     Recover(commands::recover::RecoverArgs),
+    /// Capture a bare-metal system fingerprint
+    SystemSnapshot(commands::system_snapshot::SystemSnapshotArgs),
 }
 
 #[tokio::main]
@@ -47,6 +49,7 @@ async fn main() {
         Commands::Prune(args) => commands::prune::prune(args).await,
         Commands::Security(args) => commands::security::security(args).await,
         Commands::Recover(args) => commands::recover::recover(args).await,
+        Commands::SystemSnapshot(args) => commands::system_snapshot::run(args).await,
     };
 
     if let Err(e) = result {

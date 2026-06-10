@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::system::{CaptureOpts, CaptureWarning};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MdadmConfig {
@@ -92,15 +92,15 @@ mod linux {
             return Ok((None, Vec::new()));
         }
         let mut warnings = Vec::new();
-        let mdadm_conf = first_existing(&["/etc/mdadm/mdadm.conf", "/etc/mdadm.conf"])
-            .unwrap_or_default();
+        let mdadm_conf =
+            first_existing(&["/etc/mdadm/mdadm.conf", "/etc/mdadm.conf"]).unwrap_or_default();
 
         let mut arrays = Vec::new();
         if let Ok(entries) = std::fs::read_dir("/dev") {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy().to_string();
-                if !(name.starts_with("md") && !name.contains("p")) {
+                if !name.starts_with("md") || name.contains("p") {
                     continue;
                 }
                 let dev_path = format!("/dev/{name}");

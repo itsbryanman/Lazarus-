@@ -47,9 +47,9 @@ impl BlockTracker {
     pub fn open_at<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let conn = Connection::open(db_path.as_ref())
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")
+        conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
@@ -101,11 +101,8 @@ impl BlockTracker {
             params![key, mtime as i64, size as i64],
         )
         .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
-        tx.execute(
-            "DELETE FROM FileChunks WHERE path = ?1",
-            params![key],
-        )
-        .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
+        tx.execute("DELETE FROM FileChunks WHERE path = ?1", params![key])
+            .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         {
             let mut stmt = tx
                 .prepare(
@@ -214,13 +211,15 @@ impl BlockTracker {
             .map_err(|e| LazarusError::DatabaseError(e.to_string()))?;
         Ok(n as u64)
     }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
 }
 
 fn path_key(path: &Path) -> String {
     // Canonicalize when possible; fall back to the raw path otherwise.
-    let canon: PathBuf = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let canon: PathBuf = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     canon.to_string_lossy().into_owned()
 }
 

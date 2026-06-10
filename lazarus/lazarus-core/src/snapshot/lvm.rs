@@ -75,8 +75,10 @@ impl LvmSnapshot {
     /// must be a path to an LV (e.g. `/dev/vg0/data` or
     /// `/dev/mapper/vg0-data`).
     pub fn create(volume: &Path, snapshot_name: &str) -> Result<Self> {
-        let mut opts = LvmSnapshotOpts::default();
-        opts.snapshot_name = Some(snapshot_name.to_string());
+        let opts = LvmSnapshotOpts {
+            snapshot_name: Some(snapshot_name.to_string()),
+            ..Default::default()
+        };
         Self::create_with_opts(volume, &opts)
     }
 
@@ -263,12 +265,13 @@ fn parse_lv_path(volume: &Path) -> Result<(String, String)> {
             return Ok((vg.to_string(), lv.to_string()));
         }
     }
-    if let Some(rest) = s.strip_prefix("/dev/") {
-        if let Some((vg, lv)) = rest.split_once('/') {
-            if !vg.is_empty() && !lv.is_empty() && !lv.contains('/') {
-                return Ok((vg.to_string(), lv.to_string()));
-            }
-        }
+    if let Some(rest) = s.strip_prefix("/dev/")
+        && let Some((vg, lv)) = rest.split_once('/')
+        && !vg.is_empty()
+        && !lv.is_empty()
+        && !lv.contains('/')
+    {
+        return Ok((vg.to_string(), lv.to_string()));
     }
     Err(LazarusError::Storage(format!(
         "not a recognizable LVM volume path: {s}"
@@ -307,7 +310,9 @@ fn path_is_lvm_volume(path: &Path) -> Option<bool> {
         let vg = parts.next();
         let lv = parts.next();
         let extra = parts.next();
-        return Some(matches!((vg, lv, extra), (Some(v), Some(l), None) if !v.is_empty() && !l.is_empty()));
+        return Some(
+            matches!((vg, lv, extra), (Some(v), Some(l), None) if !v.is_empty() && !l.is_empty()),
+        );
     }
     Some(false)
 }

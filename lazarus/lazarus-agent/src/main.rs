@@ -11,6 +11,7 @@ use lazarus_core::compression::adaptive;
 use lazarus_core::config::ConfigManager;
 use lazarus_core::error::LazarusError;
 use lazarus_core::security::ransomware::{DetectionEngine, DetectionVerdict};
+use lazarus_core::snapshot::dedup::DedupTable;
 use lazarus_core::storage::backend::StorageBackend;
 use lazarus_core::storage::local::LocalStorage;
 use std::convert::TryFrom;
@@ -392,6 +393,9 @@ impl Agent {
                 )
                 .await?;
             }
+            ObjectType::SystemFingerprint => {
+                return Err("this snapshot's root object is a SystemFingerprint; restore it from the recovery environment, not the agent".into());
+            }
         }
 
         let (percent, processed_bytes, total_bytes) = progress_tracker.finalize();
@@ -532,6 +536,11 @@ impl Agent {
         let config_mgr = ConfigManager::new(&self.repository);
         let catalog = CatalogIndex::new(config_mgr.database_path())?;
         let storage = LocalStorage::new(config_mgr.data_path());
+        // Open the DedupTable to protect fingerprint chunks that still
+        // have live references. Full ref-removal parity with the CLI
+        // prune can be a follow-up; for now we only protect.
+        // TODO(phase-4): full dedup ref removal in agent prune
+        let dedup = DedupTable::open(config_mgr.database_path())?;
 
         let progress_request = Request::new(tokio_stream::once(ProgressUpdate {
             agent_id: self.agent_id.clone(),
@@ -572,7 +581,30 @@ impl Agent {
         let all_chunks = catalog.list_all_chunk_hashes()?;
         let reclaimable: Vec<String> = all_chunks
             .into_iter()
-            .filter(|hash| !active_chunks.contains(hash))
+            .filter(|hash| {
+                if active_chunks.contains(hash) {
+                    return false;
+                }
+                // Protect chunks that still have dedup references
+                // (e.g. fingerprint chunks from --capture-system).
+                if hash.len() == 64 {
+                    let mut bytes = [0u8; 32];
+                    let mut valid = true;
+                    for i in 0..32 {
+                        match u8::from_str_radix(&hash[i * 2..i * 2 + 2], 16) {
+                            Ok(b) => bytes[i] = b,
+                            Err(_) => {
+                                valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if valid && dedup.refcount(&bytes).unwrap_or(0) > 0 {
+                        return false;
+                    }
+                }
+                true
+            })
             .collect();
 
         if reclaimable.is_empty() {
@@ -904,6 +936,9 @@ fn estimate_restore_metrics_inner(
 
     match obj_type {
         ObjectType::File | ObjectType::BlockDevice => Ok((1, metadata.size)),
+        // SystemFingerprint objects are not file-tree children; they
+        // contribute zero files/bytes to restore metrics.
+        ObjectType::SystemFingerprint => Ok((0, 0)),
         ObjectType::Directory => {
             let mut files = 0;
             let mut bytes = 0;
@@ -963,6 +998,7 @@ impl RestoreProgress {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_file(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -1012,6 +1048,7 @@ async fn restore_file(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_directory(
     key_manager: &lazarus_core::encryption::key_manager::KeyManager,
     catalog: &CatalogIndex,
@@ -1073,6 +1110,12 @@ async fn restore_directory(
                     progress,
                 ))
                 .await?;
+            }
+            ObjectType::SystemFingerprint => {
+                return Err(
+                    "nested SystemFingerprint objects are not supported in file-tree restore"
+                        .into(),
+                );
             }
         }
     }
@@ -1202,6 +1245,12 @@ fn mark_object_chunks(
             for (child_id, _) in catalog.get_tree_children(object_id)? {
                 mark_object_chunks(catalog, child_id, visited_objects, active_chunks)?;
             }
+        }
+        ObjectType::SystemFingerprint => {
+            // SystemFingerprint chunks are referenced via the
+            // DedupTable directly at capture time (see
+            // FingerprintPersister); there are no per-object chunk
+            // rows to mark from the catalog side.
         }
     }
 

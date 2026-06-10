@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::persist::FingerprintPersister;
 use super::system::{CaptureOpts, CaptureWarning, NamedBlob};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BootloaderConfig {
@@ -22,17 +22,12 @@ pub struct BootloaderConfig {
     pub kernel_files: Vec<KernelFileEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum BootMode {
     Uefi,
     Bios,
+    #[default]
     Unknown,
-}
-
-impl Default for BootMode {
-    fn default() -> Self {
-        BootMode::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +66,9 @@ pub struct KernelFileEntry {
 
 pub async fn capture_bootloader(
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] opts: &CaptureOpts,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<'_>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] persister: &FingerprintPersister<
+        '_,
+    >,
 ) -> Result<(BootloaderConfig, Vec<CaptureWarning>)> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -96,7 +93,11 @@ mod linux {
         let mut warnings = Vec::new();
         let uefi_active = Path::new("/sys/firmware/efi").exists();
 
-        let mode = if uefi_active { BootMode::Uefi } else { BootMode::Bios };
+        let mode = if uefi_active {
+            BootMode::Uefi
+        } else {
+            BootMode::Bios
+        };
 
         let mut uefi = None;
         let mut bios = None;
@@ -131,11 +132,8 @@ mod linux {
                 Ok(b) => b,
                 Err(e) => {
                     warnings.push(
-                        CaptureWarning::new(
-                            "bootloader",
-                            format!("could not tar /boot/efi: {e}"),
-                        )
-                        .with_remediation("mount the ESP at /boot/efi and re-run as root"),
+                        CaptureWarning::new("bootloader", format!("could not tar /boot/efi: {e}"))
+                            .with_remediation("mount the ESP at /boot/efi and re-run as root"),
                     );
                     Vec::new()
                 }
@@ -171,22 +169,20 @@ mod linux {
 
         // Secure Boot state via efivar byte 4.
         let mut secure_boot_state = "unknown".to_string();
-        if let Ok(entries) = std::fs::read_dir("/sys/firmware/efi/efivars") {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("SecureBoot-") {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        if bytes.len() >= 5 {
-                            secure_boot_state = if bytes[4] == 1 {
-                                "enabled".into()
-                            } else {
-                                "disabled".into()
-                            };
-                        }
-                    }
-                    break;
-                }
+        if let Ok(entries) = std::fs::read_dir("/sys/firmware/efi/efivars")
+            && let Some(entry) = entries.flatten().next()
+        {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("SecureBoot-")
+                && let Ok(bytes) = std::fs::read(entry.path())
+                && bytes.len() >= 5
+            {
+                secure_boot_state = if bytes[4] == 1 {
+                    "enabled".into()
+                } else {
+                    "disabled".into()
+                };
             }
         }
 
@@ -318,20 +314,20 @@ mod linux {
     fn resolve_root_disk() -> Option<String> {
         // Walk /proc/cmdline for root=
         let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
-        let root_token = cmdline.split_whitespace().find_map(|t| t.strip_prefix("root="));
+        let root_token = cmdline
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("root="));
         let mut root_device: Option<String> = None;
         if let Some(tok) = root_token {
             root_device = Some(tok.to_string());
         }
         // If `root=` is a UUID/LABEL, resolve via /dev/disk/by-uuid etc.
-        if let Some(ref r) = root_device {
-            if r.starts_with("UUID=") {
-                if let Some(uuid) = r.strip_prefix("UUID=") {
-                    if let Ok(p) = std::fs::canonicalize(format!("/dev/disk/by-uuid/{uuid}")) {
-                        root_device = Some(p.to_string_lossy().to_string());
-                    }
-                }
-            }
+        if let Some(ref r) = root_device
+            && r.starts_with("UUID=")
+            && let Some(uuid) = r.strip_prefix("UUID=")
+            && let Ok(p) = std::fs::canonicalize(format!("/dev/disk/by-uuid/{uuid}"))
+        {
+            root_device = Some(p.to_string_lossy().to_string());
         }
         // Strip trailing partition digits (sda1 -> sda, nvme0n1p1 -> nvme0n1).
         root_device.map(|d| disk_of_partition(&d))
@@ -344,10 +340,11 @@ mod linux {
             return p.to_string();
         }
         // NVMe / mmc style: nvme0n1p1 -> nvme0n1, mmcblk0p1 -> mmcblk0.
-        if name.contains('p') && (name.starts_with("nvme") || name.starts_with("mmcblk")) {
-            if let Some((stem, _)) = name.rsplit_once('p') {
-                return format!("/dev/{stem}");
-            }
+        if name.contains('p')
+            && (name.starts_with("nvme") || name.starts_with("mmcblk"))
+            && let Some((stem, _)) = name.rsplit_once('p')
+        {
+            return format!("/dev/{stem}");
         }
         // sda1 -> sda.
         let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());

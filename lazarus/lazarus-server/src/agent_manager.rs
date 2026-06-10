@@ -29,6 +29,12 @@ pub struct AgentManager {
     agents: Arc<RwLock<HashMap<String, Agent>>>,
 }
 
+impl Default for AgentManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentManager {
     pub fn new() -> Self {
         Self {

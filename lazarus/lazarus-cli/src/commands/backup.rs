@@ -33,21 +33,16 @@ use tokio::task;
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
 /// Which OS-level snapshot mechanism to use for `--consistent` file backups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum SnapshotterChoice {
     /// Pick the first backend whose `supports()` check returns true.
+    #[default]
     Auto,
     Lvm,
     Btrfs,
     Zfs,
     /// Skip OS snapshotting entirely. Hooks still run if enabled.
     None,
-}
-
-impl Default for SnapshotterChoice {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Args)]
@@ -96,6 +91,14 @@ pub struct BackupArgs {
     /// names: `postgres`, `mysql`, `mongodb`, `redis`, `docker`, `all`.
     #[arg(long = "hook-template", value_name = "NAME")]
     pub hook_templates: Vec<String>,
+
+    /// Also capture a bare-metal system fingerprint alongside this backup (Linux, needs root).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub capture_system: bool,
+
+    /// Capture only the system fingerprint; skip the file/block pipeline.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub capture_system_only: bool,
 }
 
 impl Default for BackupArgs {
@@ -111,6 +114,8 @@ impl Default for BackupArgs {
             device: None,
             no_hooks: false,
             hook_templates: Vec::new(),
+            capture_system: false,
+            capture_system_only: false,
         }
     }
 }
@@ -256,6 +261,26 @@ fn build_hook_runner(templates: &[String]) -> Result<HookRunner> {
 }
 
 pub async fn backup(args: &BackupArgs) -> Result<()> {
+    // --capture-system-only: delegate entirely to the system snapshot command.
+    if args.capture_system_only {
+        let sys_args = super::system_snapshot::SystemSnapshotArgs {
+            repository: args.repository.clone(),
+            password: args.password.clone(),
+            tag: None,
+            dry_run: false,
+            print: false,
+            tool_timeout: 30,
+            skip_packages: false,
+            skip_network: false,
+            skip_users: false,
+            skip_ssh: false,
+            skip_bootloader: false,
+            skip_lvm: false,
+            skip_mdadm: false,
+        };
+        return super::system_snapshot::run(&sys_args).await;
+    }
+
     println!("Starting backup...");
 
     let cfg = validate_args(args)?;
@@ -284,7 +309,7 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     // taken *from* this path).
     let detection_engine = DetectionEngine::new(config_mgr.repo_path());
     let detection_report = detection_engine
-        .analyze_paths(&[cfg.declared_source.clone()])
+        .analyze_paths(std::slice::from_ref(&cfg.declared_source))
         .await?;
 
     match detection_report.verdict {
@@ -430,7 +455,42 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     let mut dedup = DedupTable::open(config_mgr.database_path())?;
     dedup.add_references_batch(&snapshot_id, &chunks)?;
 
-    println!("✓ Backup completed successfully!");
+    // --capture-system: attach a system fingerprint to this snapshot.
+    // Failures are non-fatal: the file backup is already committed.
+    if args.capture_system {
+        if let Some(ref source) = args.source {
+            let source_path = PathBuf::from(source);
+            let is_root = source_path.as_path() == Path::new("/");
+            let is_block = source_path
+                .metadata()
+                .map(|m| !m.is_dir() && !m.is_file())
+                .unwrap_or(false);
+            if !is_root && !is_block {
+                println!("warning: fingerprint reflects the capturing host, not the source tree");
+            }
+        }
+        match run_capture_system(&config_mgr, &key_manager, &catalog, &dedup, &snapshot_id).await {
+            Ok(fp_hash) => {
+                // Update the metadata sidecar entry with fingerprint info.
+                let meta_store = lazarus_core::catalog::metadata::MetadataStore::open(
+                    config_mgr.repo_path(),
+                    *key_manager.get_metadata_key(),
+                );
+                let mut sidecar = meta_store.get(&snapshot_id)?.unwrap_or_default();
+                sidecar.system_fingerprint_chunk = Some(fp_hash.clone());
+                sidecar.system_fingerprint_format_version = Some(1);
+                if let Err(e) = meta_store.put(&snapshot_id, &sidecar) {
+                    println!("warning: failed to update sidecar with fingerprint: {}", e);
+                }
+                println!("  System fingerprint: {}", fp_hash);
+            }
+            Err(e) => {
+                println!("warning: system capture failed (backup is intact): {}", e);
+            }
+        }
+    }
+
+    println!("Backup completed successfully!");
     println!("  Snapshot ID: {}", snapshot_id);
 
     let (chunks, objects, snapshots) = catalog.get_stats()?;
@@ -440,6 +500,28 @@ pub async fn backup(args: &BackupArgs) -> Result<()> {
     println!("    Snapshots: {}", snapshots);
 
     Ok(())
+}
+
+/// Run the system capture pipeline and persist the fingerprint under the given snapshot.
+async fn run_capture_system(
+    config_mgr: &ConfigManager,
+    key_manager: &lazarus_core::encryption::key_manager::KeyManager,
+    catalog: &CatalogIndex,
+    dedup: &DedupTable,
+    snapshot_id: &str,
+) -> Result<String> {
+    use lazarus_core::capture::capture_system;
+    use lazarus_core::capture::persist::FingerprintPersister;
+    use lazarus_core::capture::system::CaptureOpts;
+
+    let storage = LocalStorage::new(config_mgr.data_path());
+    let opts = CaptureOpts::default();
+    let persister =
+        FingerprintPersister::new(&storage, key_manager, catalog, dedup, snapshot_id, false);
+
+    let report = capture_system(&opts, &persister).await?;
+    let fp_hash = persister.persist_fingerprint(&report.fingerprint).await?;
+    Ok(fp_hash)
 }
 
 struct AcquiredReadPath {
@@ -577,7 +659,7 @@ async fn capture_from(
 ) -> Result<(i64, HashSet<[u8; 32]>, serde_json::Value)> {
     match cfg.mode {
         CaptureMode::File => {
-            let total_bytes = estimate_total_bytes(&read_path)?;
+            let total_bytes = estimate_total_bytes(read_path)?;
             let progress = create_progress_bar(total_bytes, "Backing up");
             progress.println(format!("Source: {}", read_path.display()));
 
@@ -587,7 +669,7 @@ async fn capture_from(
                     key_manager,
                     catalog,
                     storage,
-                    &read_path,
+                    read_path,
                     retention,
                     &progress,
                     &mut chunk_set,
@@ -598,7 +680,7 @@ async fn capture_from(
                     key_manager,
                     catalog,
                     storage,
-                    &read_path,
+                    read_path,
                     retention,
                     &progress,
                     &mut chunk_set,
@@ -765,6 +847,7 @@ async fn backup_file(
     Ok(file_object_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_processed_chunk(
     chunk: ChunkProcessingResult,
     catalog: &CatalogIndex,
@@ -909,9 +992,8 @@ async fn backup_block_device(
         // this allocation is bounded.
         let data = reader.read_extent(extent)?;
         bytes_captured += data.len() as u64;
-        let mut chunk_idx = 0u64;
         let mut rel_offset = 0u64;
-        for piece in data.chunks(CHUNK_SIZE) {
+        for (chunk_idx, piece) in data.chunks(CHUNK_SIZE).enumerate() {
             // Drain the in-flight queue once it reaches `pipeline_depth`
             // so we don't unboundedly buffer chunk-processing tasks.
             while inflight.len() >= pipeline_depth {
@@ -939,13 +1021,12 @@ async fn backup_block_device(
                 key_manager.clone(),
                 Some(BlockChunkPosition {
                     extent_idx,
-                    chunk_idx,
+                    chunk_idx: chunk_idx as u64,
                     rel_offset,
                 }),
             );
             inflight.push(handle);
             scheduled_chunks += 1;
-            chunk_idx += 1;
             rel_offset += piece.len() as u64;
         }
     }
@@ -1154,6 +1235,8 @@ mod tests {
             device: None,
             no_hooks: false,
             hook_templates: Vec::new(),
+            capture_system: false,
+            capture_system_only: false,
         }
     }
 

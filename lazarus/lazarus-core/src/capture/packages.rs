@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::system::{CaptureOpts, CaptureWarning, NamedBlob};
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackageManifest {
@@ -21,19 +21,14 @@ pub struct PackageManifest {
     pub keyrings: Vec<NamedBlob>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PackageManager {
     Dpkg,
     Rpm,
     Pacman,
     Apk,
+    #[default]
     Unknown,
-}
-
-impl Default for PackageManager {
-    fn default() -> Self {
-        PackageManager::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +106,9 @@ pub fn parse_pacman_q(s: &str) -> Vec<PackageEntry> {
     for line in s.lines() {
         let mut parts = line.split_whitespace();
         let Some(name) = parts.next() else { continue };
-        let Some(version) = parts.next() else { continue };
+        let Some(version) = parts.next() else {
+            continue;
+        };
         out.push(PackageEntry {
             name: name.to_string(),
             version: version.to_string(),
@@ -169,7 +166,10 @@ mod linux {
         let packages = match manager {
             PackageManager::Dpkg => match super::super::util::run_capture_str(
                 "dpkg-query",
-                &["-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n"],
+                &[
+                    "-W",
+                    "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n",
+                ],
                 opts.tool_timeout,
             )
             .await
@@ -185,7 +185,11 @@ mod linux {
             },
             PackageManager::Rpm => match super::super::util::run_capture_str(
                 "rpm",
-                &["-qa", "--queryformat", "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n"],
+                &[
+                    "-qa",
+                    "--queryformat",
+                    "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                ],
                 opts.tool_timeout,
             )
             .await
@@ -199,38 +203,34 @@ mod linux {
                     Vec::new()
                 }
             },
-            PackageManager::Pacman => match super::super::util::run_capture_str(
-                "pacman",
-                &["-Q"],
-                opts.tool_timeout,
-            )
-            .await
-            {
-                Ok(s) => parse_pacman_q(&s),
-                Err(e) => {
-                    warnings.push(CaptureWarning::new(
-                        "packages",
-                        format!("pacman -Q failed: {e}"),
-                    ));
-                    Vec::new()
+            PackageManager::Pacman => {
+                match super::super::util::run_capture_str("pacman", &["-Q"], opts.tool_timeout)
+                    .await
+                {
+                    Ok(s) => parse_pacman_q(&s),
+                    Err(e) => {
+                        warnings.push(CaptureWarning::new(
+                            "packages",
+                            format!("pacman -Q failed: {e}"),
+                        ));
+                        Vec::new()
+                    }
                 }
-            },
-            PackageManager::Apk => match super::super::util::run_capture_str(
-                "apk",
-                &["info", "-v"],
-                opts.tool_timeout,
-            )
-            .await
-            {
-                Ok(s) => parse_apk_info(&s),
-                Err(e) => {
-                    warnings.push(CaptureWarning::new(
-                        "packages",
-                        format!("apk info failed: {e}"),
-                    ));
-                    Vec::new()
+            }
+            PackageManager::Apk => {
+                match super::super::util::run_capture_str("apk", &["info", "-v"], opts.tool_timeout)
+                    .await
+                {
+                    Ok(s) => parse_apk_info(&s),
+                    Err(e) => {
+                        warnings.push(CaptureWarning::new(
+                            "packages",
+                            format!("apk info failed: {e}"),
+                        ));
+                        Vec::new()
+                    }
                 }
-            },
+            }
             PackageManager::Unknown => {
                 warnings.push(
                     CaptureWarning::new("packages", "no supported package manager detected")

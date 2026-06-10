@@ -13,11 +13,11 @@
 //! respects them, and both prefix the AEAD plaintext with an 8-byte
 //! magic+version header so a future format bump is detectable.
 
-use lazarus_core::catalog::index::CatalogIndex;
-use lazarus_core::encryption::key_manager::KeyManager;
-use lazarus_core::error::{LazarusError, Result};
-use lazarus_core::snapshot::dedup::DedupTable;
-use lazarus_core::storage::backend::StorageBackend;
+use crate::catalog::index::CatalogIndex;
+use crate::encryption::key_manager::KeyManager;
+use crate::error::{LazarusError, Result};
+use crate::snapshot::dedup::DedupTable;
+use crate::storage::backend::StorageBackend;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
@@ -43,6 +43,7 @@ pub struct FingerprintPersister<'a> {
     pub(crate) buffered: Mutex<Vec<BufferedWrite>>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct BufferedWrite {
     pub hex: String,
     pub kind: BufferedKind,
@@ -121,9 +122,8 @@ impl<'a> FingerprintPersister<'a> {
     pub async fn load_blob_metadata_key<T: DeserializeOwned>(&self, hex_hash: &str) -> Result<T> {
         let plaintext = self.get_metadata_key_bytes(hex_hash).await?;
         let body = strip_header(&plaintext, MAGIC_SENSITIVE_BLOB, "sensitive_blob")?;
-        bincode::deserialize(body).map_err(|e| {
-            LazarusError::SerializationError(format!("blob bincode decode: {e}"))
-        })
+        bincode::deserialize(body)
+            .map_err(|e| LazarusError::SerializationError(format!("blob bincode decode: {e}")))
     }
 
     // --- internals -------------------------------------------------------
@@ -143,7 +143,8 @@ impl<'a> FingerprintPersister<'a> {
         let mut on_disk = Vec::with_capacity(nonce.len() + ct.len());
         on_disk.extend_from_slice(&nonce);
         on_disk.extend_from_slice(&ct);
-        self.backend.put(&hex, &on_disk).await?;
+        let storage_key = sharded_key(&hex);
+        self.backend.put(&storage_key, &on_disk).await?;
         self.register_ref(&hex)?;
         Ok(hex)
     }
@@ -161,13 +162,15 @@ impl<'a> FingerprintPersister<'a> {
         let mut on_disk = Vec::with_capacity(nonce.len() + ct.len());
         on_disk.extend_from_slice(&nonce);
         on_disk.extend_from_slice(&ct);
-        self.backend.put(&hex, &on_disk).await?;
+        let storage_key = sharded_key(&hex);
+        self.backend.put(&storage_key, &on_disk).await?;
         self.register_ref(&hex)?;
         Ok(hex)
     }
 
     async fn get_data_key_bytes(&self, hex_hash: &str) -> Result<Vec<u8>> {
-        let on_disk = self.backend.get(hex_hash).await?;
+        let storage_key = sharded_key(hex_hash);
+        let on_disk = self.backend.get(&storage_key).await?;
         if on_disk.len() < 12 {
             return Err(LazarusError::Storage(
                 "fingerprint chunk too short to contain nonce".into(),
@@ -178,7 +181,8 @@ impl<'a> FingerprintPersister<'a> {
     }
 
     async fn get_metadata_key_bytes(&self, hex_hash: &str) -> Result<Vec<u8>> {
-        let on_disk = self.backend.get(hex_hash).await?;
+        let storage_key = sharded_key(hex_hash);
+        let on_disk = self.backend.get(&storage_key).await?;
         if on_disk.len() < 12 {
             return Err(LazarusError::Storage(
                 "sensitive blob chunk too short to contain nonce".into(),
@@ -189,9 +193,8 @@ impl<'a> FingerprintPersister<'a> {
     }
 
     fn register_ref(&self, hex_hash: &str) -> Result<()> {
-        let bytes = hex::decode(hex_hash).map_err(|e| {
-            LazarusError::Storage(format!("invalid chunk hash hex: {e}"))
-        })?;
+        let bytes = hex::decode(hex_hash)
+            .map_err(|e| LazarusError::Storage(format!("invalid chunk hash hex: {e}")))?;
         if bytes.len() != 32 {
             return Err(LazarusError::Storage(format!(
                 "expected 32-byte BLAKE3 hash, got {}",
@@ -203,6 +206,14 @@ impl<'a> FingerprintPersister<'a> {
         self.dedup.add_reference(&arr, self.snapshot_id)?;
         Ok(())
     }
+}
+
+/// Build a sharded storage key from a bare hex hash.
+///
+/// Matches the convention used by `backup.rs` and `prune.rs`:
+/// `format!("{}/{}", &hex[..2], hex)`.
+pub fn sharded_key(hex_hash: &str) -> String {
+    format!("{}/{}", &hex_hash[..2], hex_hash)
 }
 
 /// Strip the 8-byte magic+version header. Returns the body slice on
@@ -233,7 +244,7 @@ fn strip_header<'a>(buf: &'a [u8], expected_magic: &[u8; 4], label: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazarus_core::storage::local::LocalStorage;
+    use crate::storage::local::LocalStorage;
     use tempfile::tempdir;
 
     fn dummy_fingerprint() -> SystemFingerprint {
@@ -271,7 +282,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
         let got = persister.load_fingerprint(&hash).await.unwrap();
@@ -286,7 +298,8 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", true);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", true);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
         assert_eq!(hash.len(), 64);
@@ -301,16 +314,38 @@ mod tests {
         let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
         let storage = LocalStorage::new(dir.path().join("data"));
         let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
-        let persister = FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
         let fp = dummy_fingerprint();
         let hash = persister.persist_fingerprint(&fp).await.unwrap();
 
-        // Tamper with the stored ciphertext.
-        let on_disk = storage.get(&hash).await.unwrap();
+        // Tamper with the stored ciphertext using the sharded key.
+        let key = sharded_key(&hash);
+        let on_disk = storage.get(&key).await.unwrap();
         let mut bad = on_disk.clone();
         let last = bad.len() - 1;
         bad[last] ^= 0xFF;
-        storage.put(&hash, &bad).await.unwrap();
+        storage.put(&key, &bad).await.unwrap();
         assert!(persister.load_fingerprint(&hash).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn storage_uses_sharded_key() {
+        let dir = tempdir().unwrap();
+        let (keys, _cfg) = KeyManager::init_repository("pw").unwrap();
+        let catalog = CatalogIndex::new(dir.path().join("catalog.db")).unwrap();
+        let storage = LocalStorage::new(dir.path().join("data"));
+        let dedup = DedupTable::open(dir.path().join("catalog.db")).unwrap();
+        let persister =
+            FingerprintPersister::new(&storage, &keys, &catalog, &dedup, "snap-1", false);
+        let fp = dummy_fingerprint();
+        let hash = persister.persist_fingerprint(&fp).await.unwrap();
+
+        // The bare key must not exist; the sharded key must.
+        assert!(storage.get(&hash).await.is_err());
+        let sharded = sharded_key(&hash);
+        assert!(storage.get(&sharded).await.is_ok());
+        // Verify the shard prefix matches the first two hex chars.
+        assert!(sharded.starts_with(&format!("{}/", &hash[..2])));
     }
 }

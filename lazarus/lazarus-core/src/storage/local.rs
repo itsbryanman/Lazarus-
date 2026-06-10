@@ -162,10 +162,8 @@ impl StorageBackend for LocalStorage {
         let mut dir = fs::read_dir(self.path.join(prefix)).await?;
         while let Some(entry) = dir.next_entry().await? {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(path_str) = path.to_str() {
-                    entries.push(path_str.to_string());
-                }
+            if path.is_file() && let Some(path_str) = path.to_str() {
+                entries.push(path_str.to_string());
             }
         }
         Ok(entries)

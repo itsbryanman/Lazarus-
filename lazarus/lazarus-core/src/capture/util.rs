@@ -1,7 +1,5 @@
 //! Shared shell-out helpers used by multiple collectors.
 
-#![cfg(target_os = "linux")]
-
 use std::time::Duration;
 use tokio::process::Command;
 

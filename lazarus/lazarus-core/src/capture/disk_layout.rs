@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use super::system::CaptureWarning;
-use lazarus_core::error::Result;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskLayout {
@@ -320,10 +320,13 @@ mod linux {
                 }
             }
             Err(e) => {
-                warnings.push(CaptureWarning::new(
-                    "disk",
-                    format!("could not read sector 0 of {device}: {e}"),
-                ).with_remediation("re-run as root"));
+                warnings.push(
+                    CaptureWarning::new(
+                        "disk",
+                        format!("could not read sector 0 of {device}: {e}"),
+                    )
+                    .with_remediation("re-run as root"),
+                );
                 TableKind::None
             }
         };

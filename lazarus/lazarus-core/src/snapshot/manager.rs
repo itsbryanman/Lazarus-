@@ -28,15 +28,14 @@ use crate::catalog::history::{History, Operation};
 use crate::catalog::index::CatalogIndex;
 use crate::catalog::metadata::{MetadataStore, SnapshotMetadata};
 use crate::encryption::aes::StreamingEncryptor;
-use crate::error::{LazarusError, Result};
+use crate::error::Result;
 use crate::integrity::merkle::{self, Node};
 use crate::snapshot::block_tracker::BlockTracker;
-use crate::snapshot::dedup::{DedupStats, DedupTable};
+use crate::snapshot::dedup::DedupTable;
 use crate::storage::backend::{RetentionLock, StorageBackend};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Identifier for a snapshot. Currently a timestamp-derived string but typed
 /// so call sites are self-documenting and we can swap the format later
@@ -45,7 +44,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct SnapshotId(pub String);
 
 impl SnapshotId {
-    pub fn from_str(s: impl Into<String>) -> Self {
+    pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
     pub fn as_str(&self) -> &str {
@@ -291,11 +290,7 @@ impl SnapshotManager {
 
     /// Record an arbitrary operation in the history log. Used by the CLI
     /// commands that aren't yet fully ported to the manager.
-    pub fn record_history(
-        &self,
-        op: Operation,
-        details: serde_json::Value,
-    ) -> Result<()> {
+    pub fn record_history(&self, op: Operation, details: serde_json::Value) -> Result<()> {
         self.history.record(op, &self.actor, details)?;
         Ok(())
     }
@@ -328,30 +323,27 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("indexes")).unwrap();
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
         let catalog = CatalogIndex::new(dir.path().join("indexes").join("index.db")).unwrap();
-        let storage: Arc<dyn StorageBackend> =
-            Arc::new(LocalStorage::new(dir.path().join("data")));
-        let mgr = SnapshotManager::new(
-            dir.path(),
-            catalog,
-            storage,
-            [1u8; 32],
-            [2u8; 32],
-        )
-        .unwrap();
+        let storage: Arc<dyn StorageBackend> = Arc::new(LocalStorage::new(dir.path().join("data")));
+        let mgr = SnapshotManager::new(dir.path(), catalog, storage, [1u8; 32], [2u8; 32]).unwrap();
         (dir, mgr)
     }
 
     #[test]
     fn finalize_records_refs_metadata_and_history() {
         let (_dir, mut mgr) = make_manager();
-        let id = SnapshotId::from_str("snap-test");
+        let id = SnapshotId::new("snap-test");
         let chunks = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
         let meta = SnapshotMetadata {
             description: Some("smoke test".into()),
             ..Default::default()
         };
-        mgr.finalize_snapshot(&id, &chunks, &meta, Some(SnapshotManager::merkle_root(&chunks)))
-            .unwrap();
+        mgr.finalize_snapshot(
+            &id,
+            &chunks,
+            &meta,
+            Some(SnapshotManager::merkle_root(&chunks)),
+        )
+        .unwrap();
 
         let stats = mgr.dedup().stats().unwrap();
         assert_eq!(stats.referenced_chunks, 3);
@@ -369,8 +361,7 @@ mod tests {
         let (dir, mut mgr) = make_manager();
 
         // Pre-seed the Chunks table so unreferenced_chunks has rows to find.
-        let conn = rusqlite::Connection::open(dir.path().join("indexes").join("index.db"))
-            .unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("indexes").join("index.db")).unwrap();
         for i in 0..3u8 {
             let hex: String = [i; 32].iter().map(|b| format!("{:02x}", b)).collect();
             conn.execute(
@@ -381,7 +372,7 @@ mod tests {
         }
         drop(conn);
 
-        let id = SnapshotId::from_str("only-snap");
+        let id = SnapshotId::new("only-snap");
         let chunks = vec![[0u8; 32], [1u8; 32], [2u8; 32]];
         mgr.finalize_snapshot(&id, &chunks, &SnapshotMetadata::default(), None)
             .unwrap();

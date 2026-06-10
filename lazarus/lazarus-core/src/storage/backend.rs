@@ -4,16 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 
 /// Object lock protection mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RetentionMode {
+    #[default]
     Governance,
     Compliance,
-}
-
-impl Default for RetentionMode {
-    fn default() -> Self {
-        RetentionMode::Governance
-    }
 }
 
 /// Retention configuration used when applying immutability to an object
