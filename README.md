@@ -16,7 +16,7 @@
 ####### #    # ###### #    # #    #  ####   ####  
 ```
 
-> **"The Unkillable, Enterprise-Grade Backup Solution for Bare Metal & Cloud."**
+> **The Unkillable, Enterprise-Grade Backup Solution for Bare Metal & Cloud.**
 
 Lazarus is the ops team’s bunker. It streams multi-terabyte disks with megabytes of RAM, atomically commits every chunk, and lets you rotate master keys whenever policy demands—all while the server orchestrates restore/prune jobs across fleets.
 
