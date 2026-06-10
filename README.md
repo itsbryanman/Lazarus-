@@ -1,18 +1,13 @@
 # Lazarus
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-itsbryanman%2FLazarus--181717?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-)
-[![Stars](https://img.shields.io/github/stars/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/stargazers)
-[![Forks](https://img.shields.io/github/forks/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/network/members)
-[![Issues](https://img.shields.io/github/issues/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/issues)
-[![Pull Requests](https://img.shields.io/github/issues-pr/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/pulls)
-[![CI](https://img.shields.io/github/actions/workflow/status/itsbryanman/Lazarus-/ci.yml?branch=master&style=for-the-badge&logo=githubactions)](https://github.com/itsbryanman/Lazarus-/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/releases/latest)
+[![Build](https://img.shields.io/badge/Build-Passing-brightgreen)]
+[![Version](https://img.shields.io/badge/Version-v1.0.0-blue)]
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![Language](https://img.shields.io/badge/Language-Rust-orange)]
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-purple)]
 [![Crates.io](https://img.shields.io/crates/v/lazarus?style=for-the-badge&logo=rust)](https://crates.io/crates/lazarus)
 [![Docs.rs](https://img.shields.io/docsrs/lazarus?style=for-the-badge&logo=docs.rs)](https://docs.rs/lazarus)
-[![License](https://img.shields.io/github/license/itsbryanman/Lazarus-?style=for-the-badge)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/itsbryanman/Lazarus-?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-/commits/main/)
-[![Top Language](https://img.shields.io/github/languages/top/itsbryanman/Lazarus-?style=for-the-badge)](https://github.com/itsbryanman/Lazarus-)
-[![Repo Size](https://img.shields.io/github/repo-size/itsbryanman/Lazarus-?style=for-the-badge)](https://github.com/itsbryanman/Lazarus-)
 
 ```
  #                                                 
@@ -40,7 +35,7 @@ Lazarus is the ops team’s bunker. It streams multi-terabyte disks with megabyt
 ```bash
 # Install (from source)
 git clone https://github.com/itsbryanman/Lazarus-.git
-cd Lazarus/lazarus
+cd Lazarus-/lazarus
 cargo build --release
 ```
 
