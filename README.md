@@ -1,11 +1,9 @@
 # Lazarus
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-itsbryanman%2FLazarus--181717?style=for-the-badge&logo=github)](https://github.com/itsbryanman/Lazarus-)
-[![Build](https://img.shields.io/badge/Build-Passing-brightgreen)]
-[![Version](https://img.shields.io/badge/Version-v1.0.0-blue)]
-[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
-[![Language](https://img.shields.io/badge/Language-Rust-orange)]
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-purple)]
+![Build](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-v1.0.0-blue?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+
 [![Crates.io](https://img.shields.io/crates/v/lazarus?style=for-the-badge&logo=rust)](https://crates.io/crates/lazarus)
 [![Docs.rs](https://img.shields.io/docsrs/lazarus?style=for-the-badge&logo=docs.rs)](https://docs.rs/lazarus)
 
