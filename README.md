@@ -22,9 +22,9 @@ Lazarus is the ops team’s bunker. It streams multi-terabyte disks with megabyt
 
 ## Feature Highlights
 
-- 🛡️ **AES-256-GCM Encryption** with Master Key Rotation – zero-knowledge client-side crypto plus instant credential rollover.
-- ⚡ **Zero-Copy Streaming Pipeline** – feed BufReader chunks to hashing/compression/encryption workers; never OOM again.
-- ⚛️ **Atomic Writes** – write → fsync → rename guarantees crash-proof durability on local targets.
+-  **AES-256-GCM Encryption** with Master Key Rotation – zero-knowledge client-side crypto plus instant credential rollover.
+-  **Zero-Copy Streaming Pipeline** – feed BufReader chunks to hashing/compression/encryption workers; never OOM again.
+-  **Atomic Writes** – write → fsync → rename guarantees crash-proof durability on local targets.
 - 🕸️ **Server Orchestrated** – Agents execute Backup/Restore/Prune jobs driven by the control plane.
 
 ## Professional Usage
